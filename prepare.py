@@ -664,11 +664,19 @@ def _resolve(s):
     return Path(os.path.expanduser(os.path.expandvars(str(s))))
 
 
-# Off-cluster default: a configured absolute path that is absent and whose mount
-# root (e.g. /data or /block) is missing or not writable means a fresh clone
-# cannot use the MedARC path. Retarget by basename into repo-local data/ so setup
-# works without YAML edits. Existing paths are returned unchanged.
-def _localize(s):
+# Missing checked-in /data and /block dataset defaults are shared-cluster paths,
+# not portable user choices. Retarget empty/missing ones into repo-local data/
+# so `prepare.py ... download=True` makes a fresh clone runnable by itself.
+def _local_data_root(s):
+    p = _resolve(s)
+    if p.is_absolute() and len(p.parts) > 1 and p.parts[1] in {"data", "block"} and (not p.is_dir() or not any(p.iterdir())):
+        return str(REPO_ROOT / "data" / p.name)
+    return str(s)
+
+
+# Output/log roots are allowed on writable /data, but still need localizing when
+# the configured absolute mount is absent or read-only.
+def _local_output_root(s):
     p = _resolve(s)
     mount = Path(*p.parts[:2]) if p.is_absolute() and len(p.parts) > 1 else p
     if p.is_absolute() and not p.exists() and (not mount.exists() or not os.access(mount, os.W_OK)):
@@ -676,22 +684,21 @@ def _localize(s):
     return str(s)
 
 
-# Off-cluster default: a fresh clone with no /data or /block mount can't use the
-# checked-in cluster paths, so rewrite them in place to point into repo-local
-# data/ (by basename). Surgical replacement on the raw text keeps every
-# comment/format intact and only touches values that actually redirect, so the
-# YAML itself becomes the source of truth that train.py/probe.py read unchanged.
-# Idempotent, and a no-op on the cluster where the paths/mounts already exist.
+# Rewrite missing portable defaults in place before downloading. Surgical text
+# replacement preserves comments and formatting, so the YAML remains the source
+# of truth that train.py/probe.py read unchanged after preparation.
 def localize_config_file(config_path):
     raw = config_path.read_text()
     cfg = yaml.safe_load(raw)
-    roots = [cfg["data"]["dataset_dir"], *cfg["probe"]["dataset_roots"].values(), cfg["project"]["output_dir"], cfg["project"]["wandb_dir"]]
-    changes = {v: nv for v in roots if (nv := _localize(v)) != v}
+    data_roots = [cfg["data"]["dataset_dir"], *cfg["probe"]["dataset_roots"].values()]
+    output_roots = [cfg["project"]["output_dir"], cfg["project"]["wandb_dir"]]
+    changes = {v: nv for v in data_roots if (nv := _local_data_root(v)) != v}
+    changes.update({v: nv for v in output_roots if (nv := _local_output_root(v)) != v})
     for old, new in changes.items():
         raw = raw.replace(f": {old}", f": {new}")
     if changes:
         config_path.write_text(raw)
-        print(f"[data] no /data or /block mount found; rewrote {len(changes)} root(s) in {config_path} to defaults under {REPO_ROOT / 'data'}.", flush=True)
+        print(f"[data] rewrote {len(changes)} missing/unusable root(s) in {config_path} to defaults under {REPO_ROOT / 'data'}.", flush=True)
 
 
 # Flat dict of {label: expanded Path} for every data path declared in cfg.
