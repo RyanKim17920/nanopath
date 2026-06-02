@@ -126,7 +126,9 @@ may be online or offline because source review never depends on the W&B API.
 The payload intentionally makes the run inspectable. It includes:
 
 - verified GitHub login and notes
-- final metric and probe submetrics
+- final metric and public probe submetrics: `linear`, `knn`, `few_shot`,
+  `seg_jaccard`, `progression_auc`, `mutation_auc`, `survival_cindex`, and
+  `robustness`
 - run family, recipe id, and tier (`baseline` for frozen reference scripts)
 - source snapshot id, optional git remote, commit, full changed source path list,
   changed review files, and a capped review-file snapshot for server-built diffs

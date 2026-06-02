@@ -341,8 +341,8 @@ def final_metrics(summary: dict[str, Any], rows: list[dict[str, Any]]) -> dict[s
         "knn_mean_f1": "knn",
         "fewshot_mean_f1": "few_shot",
         "seg_mean_jaccard": "seg_jaccard",
-        "slide_mean_auc": "slide_auc",
-        "auc_mean": "auc",
+        "slide_mean_auc": "progression_auc",
+        "auc_mean": "mutation_auc",
         "survival_mean_cindex": "survival_cindex",
         "robustness_mean": "robustness",
     }

@@ -140,6 +140,9 @@ RUN_DIR=/data/$USER/nanopath/main/my-run
 ```
 
 The script reads `summary.json` and `metrics.jsonl`, reviews `output_dir/labless_source` rather than your current working tree, and posts the local payload in `labless_submission.json` after GitHub device sign-in succeeds. W&B can be online or offline; online runs add a public W&B link, while source review always comes from the local snapshot. The labless website, run log, and plot update automatically. See [labless/README.md](labless/README.md) for the exact payload fields, dry-run mode, baseline submission notes, and validation policy.
+Labless publishes the README-facing probe keys `linear`, `knn`, `few_shot`,
+`seg_jaccard`, `progression_auc`, `mutation_auc`, `survival_cindex`, and
+`robustness`.
 
 ## Repository layout
 
