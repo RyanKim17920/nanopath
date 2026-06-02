@@ -446,7 +446,8 @@ def main():
                 pending_ids[key].update(int(x) for x in batch[batch_key].tolist())
             global_views, local_views = [batch[key].to(device, non_blocking=True) for key in ("global_views", "local_views")]
             visible_now = batch_size * (train_cfg["global_views"] * global_patches + train_cfg["local_views"] * local_patches)
-            # Linear warmup then cosine decay to dino.lr_min, all keyed off train_flops not step count.
+            # LR/WD/teacher/freeze/KDE schedules use the public FLOP budget, so a
+            # sample-capped run can stop before the schedule reaches its endpoint.
             frac = min(1.0, train_flops / max_train_flops)
             warmup = min(1.0, train_flops / max(1, warmup_train_flops))
             if warmup < 1.0:
