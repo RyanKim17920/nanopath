@@ -30,8 +30,7 @@ class ExaonePathPatchEncoder(nn.Module):
 
     def forward(self, x):
         # get_intermediate_layers(n=1) returns the final-LayerNorm [B, 1+256, 768] tokens, which
-        # is exactly what EXAONE's own model(x) emits as the cls feature — we feed them raw, like
-        # every other baseline (the survival probe z-scores features itself, so no L2-norm needed).
+        # is exactly what EXAONE's own model(x) emits as the cls feature; use it raw like every baseline.
         seq = self.vit.get_intermediate_layers(x, n=1)[0]
         return {"x_norm_clstoken": seq[:, 0], "x_norm_patchtokens": seq[:, 1:]}
 

@@ -2,7 +2,7 @@
 
 ## Role In Nanopath
 
-`surgen` is a colorectal slide-level mutation prediction probe. It contributes one scalar to `mean_probe_score`: validation AUROC for PathoBench SR386 RAS mutation status.
+`surgen` is a colorectal slide-level mutation prediction probe. It contributes validation AUROC for PathoBench SR386 RAS mutation status to the README mutation column.
 
 ## Source
 
@@ -34,7 +34,7 @@ Only train and val are read by `probe.py`.
 
 ## Null Distribution Audit
 
-![SurGen null distributions](surgen_null_distributions.png)
+![SurGen null distributions](null_plots/surgen_null_distributions.png)
 
 `plot_null_checks.py` generates the figure above. The orange null is a fresh current-code rerun that constructs a new DINOv2-small with randomized weights for each seed before calling `probe.py`: mean 0.570, std 0.006, max 0.579. Fixed checkpoints are shown as vertical references: DINOv2-small 0.623, DINOv2-giant 0.617, GigaPath 0.626, GenBio-PathFM 0.637, and H-optimus-0 0.658.
 

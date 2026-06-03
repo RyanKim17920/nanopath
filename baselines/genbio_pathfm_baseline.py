@@ -65,7 +65,7 @@ def load_probe_model(checkpoint_path, device):
 
 def main():
     usage = "usage: python baselines/genbio_pathfm_baseline.py [config.yaml] [checkpoint_path=/path] [output_dir=/path]"
-    config_path = REPO_DIR / "configs" / "leader.yaml"
+    config_path = REPO_DIR / "configs" / "main.yaml"
     # checkpoint_path points at the HF repo directory: load_genbio_pathfm reads
     # config.json + modeling_genbio_pathfm.py + model.pth from it.
     checkpoint_path = Path("/data/genbio-pathfm")

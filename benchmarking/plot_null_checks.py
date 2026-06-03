@@ -10,6 +10,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 ROOT = Path(__file__).resolve().parent
+NULL_ROOT = ROOT / "null_plots"
 REF = {
     "break_his": {
         "DINOv2-small": 0.46474252393773324,
@@ -25,12 +26,19 @@ REF = {
         "GenBio": 0.5997352732922685,
         "H-optimus-0": 0.5619480145399081,
     },
+    "boehmk_pfs": {
+        "DINOv2-small": 0.5213113948022428,
+        "DINOv2-giant": 0.4940229678363189,
+        "GigaPath": 0.49567606575003237,
+        "GenBio": 0.5282452687315522,
+        "H-optimus-0": 0.5033222769655258,
+    },
     "cptac_pda_os": {
-        "DINOv2-small": 0.5218253662153856,
-        "DINOv2-giant": 0.4671020001342443,
-        "GigaPath": 0.5435721035982813,
-        "GenBio": 0.5470463526556408,
-        "H-optimus-0": 0.5645281098076151,
+        "DINOv2-small": 0.5274789284317809,
+        "DINOv2-giant": 0.48527276640311445,
+        "GigaPath": 0.5686546691995521,
+        "GenBio": 0.503014920300409,
+        "H-optimus-0": 0.5498793079384223,
     },
     "consep": {
         "DINOv2-small": 0.20158898624373067,
@@ -93,7 +101,7 @@ NULL_CHECKS = {
     "break_his": {
         "title": "BreakHis Tile Classification: Mean F1 Null Check",
         "xlabel": "Mean of linear, KNN, and 16-shot macro F1",
-        "output": ROOT / "break_his_null_distributions.png",
+        "output": NULL_ROOT / "break_his_null_distributions.png",
         "xlim": (0.30, 0.78),
         "bins": np.linspace(0.326, 0.353, 10),
         "tick_step": 0.05,
@@ -110,7 +118,7 @@ NULL_CHECKS = {
     "bracs": {
         "title": "BRACS Tile Classification: Mean F1 Null Check",
         "xlabel": "Mean of linear, KNN, and 16-shot macro F1",
-        "output": ROOT / "bracs_null_distributions.png",
+        "output": NULL_ROOT / "bracs_null_distributions.png",
         "xlim": (0.25, 0.62),
         "bins": np.linspace(0.272, 0.303, 11),
         "tick_step": 0.05,
@@ -124,24 +132,41 @@ NULL_CHECKS = {
             0.287606186867787, 0.29838205869242446, 0.27452559407277005, 0.2813147916424203,
         ]),
     },
-    "cptac_pda_os": {
-        "title": "CPTAC-PDA OS Survival: PCA(2) L2 CoxPH Null Check",
-        "xlabel": "Official 5-fold mean Harrell c-index",
-        "output": ROOT / "cptac_pda_os_null_distributions.png",
-        "xlim": (0.455, 0.575),
-        "bins": np.linspace(0.46, 0.57, 19),
+    "boehmk_pfs": {
+        "title": "BoehmK PFS Survival: Z-scored CoxPH Null Check",
+        "xlabel": "3-fold mean Harrell c-index",
+        "output": NULL_ROOT / "boehmk_pfs_null_distributions.png",
+        "xlim": (0.46, 0.575),
+        "bins": np.linspace(0.532, 0.570, 13),
+        "tick_step": 0.02,
+        "label_offsets": [36, 260, 145, 36, 260],
+        "label_dx": [-80, 10, 6, 6, 6],
         "null": np.array([
-            0.4993286610617876, 0.4908371999609578, 0.4868593108575041, 0.49735668616839353,
-            0.5161192143075375, 0.4906105294453554, 0.4970978129888126, 0.47825703957118526,
-            0.48942028282947215, 0.4831309937168482, 0.4858382334295892, 0.48446772116021674,
-            0.5033603704292799, 0.4921862437898671, 0.4963359709861103, 0.5040065065891601,
-            0.492868258349567, 0.4959091485387604, 0.49761872367679143, 0.5378413775174811,
+            0.5536956038177016, 0.5499921092843051, 0.5602042407562724, 0.5589505956904985,
+            0.5345136720112802, 0.5531249528781444, 0.5521084882091166, 0.5371879830721905,
+            0.5472502892872178, 0.5419321435913574, 0.543228815301526, 0.5548289915665342,
+            0.568339348540639, 0.549100257045332, 0.5575926339583622, 0.5630858271038826,
+            0.5482128161144805, 0.5472945615876214, 0.5527715237416884, 0.56351190701974,
+        ]),
+    },
+    "cptac_pda_os": {
+        "title": "CPTAC-PDA OS Survival: Z-scored CoxPH Null Check",
+        "xlabel": "Official 5-fold mean Harrell c-index",
+        "output": NULL_ROOT / "cptac_pda_os_null_distributions.png",
+        "xlim": (0.48, 0.58),
+        "bins": np.linspace(0.492, 0.551, 13),
+        "null": np.array([
+            0.5260863031343924, 0.5312102820516371, 0.5266520365187244, 0.5267306440425874,
+            0.4943420322250362, 0.5216208673250322, 0.5186973876689108, 0.5488715430748561,
+            0.5261898470786405, 0.5037742319039151, 0.5421841661987647, 0.5126133006316943,
+            0.5348451235740533, 0.5245389931886975, 0.5235305943934871, 0.5253526204816389,
+            0.5217761965592961, 0.527436929128573, 0.5394036727548965, 0.5441636523838493,
         ]),
     },
     "consep": {
         "title": "CoNSeP Segmentation: Jaccard Null Check",
         "xlabel": "Mean validation macro Jaccard",
-        "output": ROOT / "consep_null_distributions.png",
+        "output": NULL_ROOT / "consep_null_distributions.png",
         "xlim": (0.19, 0.245),
         "bins": np.linspace(0.2265, 0.2295, 8),
         "ytick_step": 5,
@@ -158,7 +183,7 @@ NULL_CHECKS = {
     "mhist": {
         "title": "MHIST Tile Classification: Mean F1 Null Check",
         "xlabel": "Mean of linear, KNN, and 16-shot macro F1",
-        "output": ROOT / "mhist_null_distributions.png",
+        "output": NULL_ROOT / "mhist_null_distributions.png",
         "xlim": (0.55, 0.83),
         "bins": np.linspace(0.56, 0.596, 11),
         "tick_step": 0.05,
@@ -175,7 +200,7 @@ NULL_CHECKS = {
     "monusac": {
         "title": "MoNuSAC Segmentation: Jaccard Null Check",
         "xlabel": "Mean validation macro Jaccard",
-        "output": ROOT / "monusac_null_distributions.png",
+        "output": NULL_ROOT / "monusac_null_distributions.png",
         "xlim": (0.22, 0.35),
         "bins": np.linspace(0.23, 0.275, 12),
         "tick_step": 0.02,
@@ -192,7 +217,7 @@ NULL_CHECKS = {
     "pcam": {
         "title": "PCam Tile Classification: Mean F1 Null Check",
         "xlabel": "Mean of linear, KNN, and 16-shot macro F1",
-        "output": ROOT / "pcam_null_distributions.png",
+        "output": NULL_ROOT / "pcam_null_distributions.png",
         "xlim": (0.70, 0.94),
         "bins": np.linspace(0.714, 0.746, 11),
         "tick_step": 0.05,
@@ -209,7 +234,7 @@ NULL_CHECKS = {
     "pannuke": {
         "title": "PanNuke Segmentation: Jaccard Null Check",
         "xlabel": "Validation macro Jaccard",
-        "output": ROOT / "pannuke_null_distributions.png",
+        "output": NULL_ROOT / "pannuke_null_distributions.png",
         "xlim": (0.28, 0.43),
         "bins": np.linspace(0.29, 0.326, 11),
         "tick_step": 0.02,
@@ -226,7 +251,7 @@ NULL_CHECKS = {
     "pathorob": {
         "title": "PathoROB Robustness: Index Null Check",
         "xlabel": "Mean robustness index",
-        "output": ROOT / "pathorob_null_distributions.png",
+        "output": NULL_ROOT / "pathorob_null_distributions.png",
         "xlim": (0.15, 0.96),
         "bins": np.linspace(0.186, 0.201, 10),
         "tick_step": 0.10,
@@ -243,7 +268,7 @@ NULL_CHECKS = {
     "surgen": {
         "title": "SurGen KRAS Mutation: AUROC Null Check",
         "xlabel": "3-fold validation AUROC",
-        "output": ROOT / "surgen_null_distributions.png",
+        "output": NULL_ROOT / "surgen_null_distributions.png",
         "xlim": (0.55, 0.67),
         "bins": np.linspace(0.557, 0.581, 11),
         "tick_step": 0.02,
@@ -260,7 +285,7 @@ NULL_CHECKS = {
     "ucla_lung": {
         "title": "UCLA Lung Progression: Logistic Probe Null Check",
         "xlabel": "3-fold validation AUROC",
-        "output": ROOT / "ucla_lung_null_distributions.png",
+        "output": NULL_ROOT / "ucla_lung_null_distributions.png",
         "xlim": (0.56, 0.79),
         "bins": np.linspace(0.684, 0.702, 10),
         "label_offsets": [205, 36, 90, 36, 310],
@@ -354,6 +379,7 @@ def draw_null_check(key):
 
 
 def main():
+    NULL_ROOT.mkdir(exist_ok=True)
     keys = sys.argv[1:] or sorted(NULL_CHECKS)
     for key in keys:
         draw_null_check(key)

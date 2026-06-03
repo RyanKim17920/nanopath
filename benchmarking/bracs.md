@@ -2,7 +2,7 @@
 
 ## Role In Nanopath
 
-`bracs` is a breast ROI classification probe. It contributes one scalar to `mean_probe_score`: the mean of linear, KNN, and 16-shot SimpleShot validation macro F1.
+`bracs` is a breast ROI classification probe. It feeds the README linear, KNN, and 16-shot columns with validation macro F1 scores; its per-dataset summary is the mean of those three heads.
 
 ## Source
 
@@ -45,7 +45,7 @@ The dataset score is `mean(linear_val_f1, knn_val_f1, fewshot_val_f1)`. Macro F1
 
 ## Null Distribution Audit
 
-![BRACS null distributions](bracs_null_distributions.png)
+![BRACS null distributions](null_plots/bracs_null_distributions.png)
 
 `plot_null_checks.py` generates the figure above. The orange null is a fresh current-code rerun that constructs a new DINOv2-small with randomized weights for each seed before calling `probe.py`: mean 0.286, std 0.008, max 0.300. Fixed checkpoints are shown as vertical references: DINOv2-small 0.510, DINOv2-giant 0.562, GigaPath 0.567, GenBio-PathFM 0.600, and H-optimus-0 0.562.
 

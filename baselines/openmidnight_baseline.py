@@ -41,7 +41,7 @@ def load_probe_model(checkpoint_path, device):
 
 def main():
     usage = "usage: python baselines/openmidnight_baseline.py [config.yaml] [checkpoint_path=/path] [output_dir=/path]"
-    config_path = REPO_DIR / "configs" / "leader.yaml"
+    config_path = REPO_DIR / "configs" / "main.yaml"
     checkpoint_path = Path("/data/OpenMidnight_ckpts/openmidnight_checkpoint.pth")
     output_dir = Path(os.path.expandvars("/data/$USER/nanopath/baselines/openmidnight"))
     for arg in sys.argv[1:]:

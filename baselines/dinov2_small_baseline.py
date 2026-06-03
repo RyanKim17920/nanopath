@@ -20,7 +20,7 @@ from probe import completed_probe_summary, prepare_probe_state, queue_probe_job
 
 def run_dinov2_baseline(script, project, recipe_id, variant, output_default, pretrained=True, seed=0):
     usage = f"usage: python baselines/{script} [config.yaml] [output_dir=/path]"
-    config_path = REPO_DIR / "configs" / "leader.yaml"
+    config_path = REPO_DIR / "configs" / "main.yaml"
     output_dir = Path(os.path.expandvars(output_default))
     for arg in sys.argv[1:]:
         if arg.endswith((".yaml", ".yml")):

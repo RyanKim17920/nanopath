@@ -2,9 +2,9 @@
 
 ![nanopath logo](imgs/nanopath_logo.png)
 
-`nanopath` is a super lean experimental harness for training tile-level computational pathology foundation models, inspired by [nanochat](https://github.com/karpathy/nanochat). It trains on at most 1,000,000 TCGA tile presentations on a single GPU and covers the full pretraining pipeline using tiles produced from the public TCGA dataset (12k WSIs) and built-in downstream probes spanning classification, segmentation, slide-level mutation/progression, survival, and robustness. The goal is to easily explore and iterate on research directions to see what works best on small-scale, then we scale up the best performing training recipes with larger compute.
+`nanopath` is a super lean experimental harness for training tile-level computational pathology foundation models, inspired by [nanochat](https://github.com/karpathy/nanochat). It trains on up to 1,000,000 TCGA tile presentations on a single GPU and covers the full pretraining pipeline using the public TCGA dataset (12k WSIs) and built-in downstream probes spanning classification, segmentation, slide-level mutation/progression, survival, and robustness. The goal is to easily explore and iterate on research directions to see what works best on small-scale, then scale up the best performing training recipes with more data and larger compute.
 
-This repository is intentionally made to be compatible with [autoresearch](https://github.com/karpathy/autoresearch)-style pursuits, and we even have a live autoresearch-style plot in [Leaderboard](#leaderboard). Nanopath models train until the next full batch would exceed the 1,000,000 tile-presentation sample cap or the run reaches the 1e18-FLOP cap, then run the fixed downstream benchmark suite.
+This repository is intentionally made to be compatible with [autoresearch](https://github.com/karpathy/autoresearch)-style pursuits, and we even have a live autoresearch-style plot in [Leaderboard](#leaderboard). Nanopath models train until the next full batch would exceed the 1,000,000 tile-presentation cap or until the run reaches the 1e18-FLOP cap.
 
 **Want to get involved? Join us in the [MedARC Discord](https://discord.gg/tVR4TWnRM9) (find us in #path-fm)!**
 
@@ -20,7 +20,7 @@ wandb login  # optional; set WANDB_MODE=offline to keep W&B local
 # download pretraining & probe datasets & DINOv2 pretrained ckpt
 python prepare.py download=True
 
-# smoke test: short training plus the fixed full probe suite
+# smoke test: very short training, then probe evals to ensure no errors
 sbatch submit/train_1gpu.sbatch configs/smoke.yaml
 # or directly on a GPU machine: python train.py configs/smoke.yaml
 
@@ -36,7 +36,7 @@ sbatch submit/train_1gpu.sbatch configs/main.yaml output_dir=$RUN_DIR
 
 `pyproject.toml` pins `torch` / `torchvision` against the CUDA 12.9 wheel index. If your GPU/driver needs a different CUDA build, edit the `torch` and `torchvision` lines in `pyproject.toml` before `uv sync`.
 
-A successful model training prints periodic train lines, appends metrics to `metrics.jsonl`, and writes the final comparison artifact to `summary.json`. `configs/smoke.yaml` is simply meant to pretrain briefly and run the fixed downstream probe suite to ensure everything works.
+A successful model training prints periodic train lines, appends metrics to `metrics.jsonl`, and writes the final comparison artifact to `summary.json`. `configs/smoke.yaml` is simply meant to pretrain briefly and then run the fixed downstream probe suite to ensure everything works without errors.
 
 ## Leaderboard
 
@@ -44,29 +44,29 @@ A successful model training prints periodic train lines, appends metrics to `met
   <img src="https://api.labless.dev/api/nano-projects/nanopath/plot.svg" alt="Nanopath progress plot" width="1290">
 </a>
 
-Score is final `mean_probe_score` across our 11-dataset benchmarking suite, assessing tile-level classification (linear probing, knn, few-shot), segmentation, slide-level classification (progression, mutation, survival), and robustness. These benchmarks are derived from [THUNDER](https://mics-lab.github.io/thunder/) and [PathoBench](https://github.com/mahmoodlab/patho-bench), with modifications to keep single-GPU evaluation lightweight. We operate only on train/validation splits for most datasets; the survival probe uses PathoBench's official five-fold CPTAC-PDA OS evaluation because that task is defined as cross-validation. See [benchmarking/README.md](benchmarking/README.md) for more information.
+Score is final `mean_probe_score`, the average of linear, knn, 16-shot, segmentation, progression, mutation, survival, and robustness. These columns summarize a 12-dataset suite derived from [THUNDER](https://mics-lab.github.io/thunder/) and [PathoBench](https://github.com/mahmoodlab/patho-bench), with modifications to keep single-GPU evaluation lightweight. See [benchmarking/README.md](benchmarking/README.md) for more information.
 
 ### Nanopath models
 
 | # | Description | final score | linear | knn | 16-shot | segmentation | progression | mutation | survival | robustness | Contributors |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| 1 | DINOv2-small/14-reg trained on TCGA w KDE| 0.5670 | 0.7546 | 0.6862 | 0.5912 | 0.3028 | 0.6387 | 0.5991 | 0.5302 | 0.8510 | @PaulScotti |
+| 1 | DINOv2-small/14-reg trained on TCGA w KDE| 0.6164 | 0.7550 | 0.6839 | 0.5890 | 0.3161 | 0.6418 | 0.5994 | 0.4929 | 0.8531 | @PaulScotti |
 
 ### Baselines
 
 | # | Name | Description | final score | linear | knn | 16-shot | segmentation | progression | mutation | survival | robustness |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | GenBio-PathFM | GenBio-PathFM ViT-G/16 | **0.6266** | 0.8076 | 0.7626 | 0.6970 | 0.3252 | 0.7680 | 0.6375 | 0.5470 | 0.9412 |
-| 2 | H-optimus-0 | H-optimus-0 ViT-G/14-reg | 0.6184 | 0.7995 | 0.7676 | 0.6931 | 0.3244 | 0.7004 | 0.6584 | 0.5645 | 0.8926 |
-| 3 | UNI-2-h | MahmoodLab UNI-2-h ViT-H/14 | 0.6129 | 0.7910 | 0.7547 | 0.6961 | 0.3233 | 0.7330 | 0.6463 | 0.5401 | 0.8637 |
-| 4 | EXAONE-Path-2.5 | LG AI Research EXAONE-Path-2.5 ViT-B/14 | 0.6000 | 0.8028 | 0.7582 | 0.6872 | 0.2820 | 0.6859 | 0.6494 | 0.5803 | 0.8409 |
-| 5 | Virchow | Paige/Microsoft Virchow ViT-H/14 | 0.5934 | 0.7915 | 0.7220 | 0.6114 | 0.3156 | 0.6689 | 0.6350 | 0.5443 | 0.8994 |
-| 6 | GigaPath | Prov-GigaPath tile encoder ViT-G/16 | 0.5882 | 0.7977 | 0.7149 | 0.6537 | 0.3212 | 0.7041 | 0.6262 | 0.5436 | 0.7448 |
-| 7 | DINOv2-giant | Untouched Meta `dinov2_vitg14_reg` | 0.5546 | 0.7689 | 0.7208 | 0.5834 | 0.2844 | 0.6000 | 0.6174 | 0.4671 | 0.7985 |
-| 8 | OpenMidnight | OpenMidnight ViT-G/14-reg | 0.5543 | 0.7926 | 0.7135 | 0.4335 | 0.3099 | 0.6993 | 0.6091 | 0.5297 | 0.7438 |
-| 9 | Midnight-12K | Kaiko Midnight-12K ViT-G/14 | 0.5536 | 0.7684 | 0.6807 | 0.5758 | 0.2664 | 0.6840 | 0.6087 | 0.5151 | 0.7823 |
-| 10 | DINOv2-small | Untouched Meta `dinov2_vits14_reg` | 0.5291 | 0.6968 | 0.6249 | 0.5834 | 0.2663 | 0.5827 | 0.6225 | 0.5218 | 0.7543 |
-| 11 | DINOv2-small random | Randomized weights `dinov2_vits14_reg` | 0.4246 | 0.5282 | 0.5066 | 0.4139 | 0.2673 | 0.6922 | 0.5648 | 0.4894 | 0.1905 |
+| 1 | GenBio-PathFM | GenBio-PathFM ViT-G/16 | **0.6818** | 0.8076 | 0.7626 | 0.6970 | 0.3252 | 0.7680 | 0.6375 | 0.5156 | 0.9412 |
+| 2 | H-optimus-0 | H-optimus-0 ViT-G/14-reg | 0.6703 | 0.7995 | 0.7676 | 0.6931 | 0.3244 | 0.7004 | 0.6584 | 0.5266 | 0.8926 |
+| 3 | UNI-2-h | MahmoodLab UNI-2-h ViT-H/14 | 0.6680 | 0.7910 | 0.7547 | 0.6961 | 0.3233 | 0.7330 | 0.6463 | 0.5362 | 0.8637 |
+| 4 | EXAONE-Path-2.5 | LG AI Research EXAONE-Path-2.5 ViT-B/14 | 0.6537 | 0.8028 | 0.7582 | 0.6872 | 0.2820 | 0.6859 | 0.6494 | 0.5229 | 0.8409 |
+| 5 | Virchow | Paige/Microsoft Virchow ViT-H/14 | 0.6444 | 0.7915 | 0.7220 | 0.6114 | 0.3156 | 0.6689 | 0.6350 | 0.5112 | 0.8994 |
+| 6 | GigaPath | Prov-GigaPath tile encoder ViT-G/16 | 0.6369 | 0.7977 | 0.7149 | 0.6537 | 0.3212 | 0.7041 | 0.6262 | 0.5322 | 0.7448 |
+| 7 | Midnight-12K | Kaiko Midnight-12K ViT-G/14 | 0.6130 | 0.7684 | 0.6807 | 0.5758 | 0.2664 | 0.6840 | 0.6087 | 0.5375 | 0.7823 |
+| 8 | DINOv2-giant | Untouched Meta `dinov2_vitg14_reg` | 0.6079 | 0.7689 | 0.7208 | 0.5834 | 0.2844 | 0.6000 | 0.6174 | 0.4896 | 0.7985 |
+| 9 | OpenMidnight | OpenMidnight ViT-G/14-reg | 0.6024 | 0.7926 | 0.7135 | 0.4335 | 0.3099 | 0.6993 | 0.6091 | 0.5175 | 0.7438 |
+| 10 | DINOv2-small | Untouched Meta `dinov2_vits14_reg` | 0.5819 | 0.6968 | 0.6249 | 0.5834 | 0.2663 | 0.5827 | 0.6225 | 0.5244 | 0.7543 |
+| 11 | DINOv2-small random | Randomized weights `dinov2_vits14_reg` | 0.4629 | 0.5282 | 0.5066 | 0.4139 | 0.2673 | 0.6922 | 0.5648 | 0.5399 | 0.1905 |
 
 Baseline rows are frozen reference checkpoints evaluated with the same probe suite. They help calibrate the plot, but pathology-specific baselines are not valid initialization points for nanopath leaderboard submissions. The reference scripts live in `baselines/`; run Virchow and GigaPath separately with `baselines/virchow_baseline.py` and `baselines/gigapath_baseline.py`.
 
@@ -99,7 +99,7 @@ Public full-run submissions must satisfy:
 
 The `run_name` is the short label shown next to your dot on the Labless plot; keep it under 20 characters and make it describe what changed. Short smoke-sized runs, failed runs, and runs missing the saved source snapshot stay local. Each verified GitHub login can submit at most 10 runs per 24 hours.
 
-To top the leaderboard you must beat the highest validated Labless run on `mean_probe_score` by at least 0.01. Submit the run to labless; that public submission is the leaderboard claim, with the saved source snapshot, changed files, notes, metrics, hardware, and optional W&B link attached. Public submissions have no wall-clock limit, so train on whatever hardware you have access to. [@PaulScotti](https://github.com/PaulScotti) will inspect promising submissions, rerun the candidate on the maintainer's single 80 GB H100 with a different rng seed, and validate it on Labless if training completes within 2 hours and the rerun still improves by at least 0.01. If its code is pushed to nanopath `main`, Labless marks that run separately as `main`. **You don't need an H100 or a PR to submit**; labless handles the public record and maintainer validation.
+To top the leaderboard you must beat the highest validated Labless run on `mean_probe_score` by at least 0.006. Submit the run to labless; that public submission is the leaderboard claim, with the saved source snapshot, changed files, notes, metrics, hardware, and optional W&B link attached. Public submissions have no wall-clock limit, so train on whatever hardware you have access to. [@PaulScotti](https://github.com/PaulScotti) will inspect promising submissions, independently rerun candidates that pass this threshold on maintainer compute with a different rng seed, and validate them on Labless if training completes within 2 hours and the rerun still improves by at least 0.006. This different-rng replication is intended to weed out lucky runs before validation. If the candidate code is pushed to nanopath `main`, Labless marks that run separately as `main`. **You don't need an H100 or a PR to submit**; labless handles the public record and maintainer validation.
 
 Code-cleanup PRs are still welcome when they simplify the codebase without changing benchmark performance on the main recipe. Leaderboard claims should go through labless instead of a pull request.
 
@@ -170,7 +170,7 @@ On the MedARC cluster, the checked-in `/data` and `/block` paths are the intende
 
 **What `download=True` does**
 1. **TCGA tiles**: `huggingface_hub.snapshot_download` (filtered to `shard-*.parquet`) pulls the 200 parquet shards (~120 GB total, `{path: string, jpeg: binary}` rows with 64-row row groups) from [`medarc/nanopath`](https://huggingface.co/datasets/medarc/nanopath) into `data.dataset_dir`.
-2. **Probe datasets**: for each empty configured root, fetches/unpacks and, where needed, pre-extracts the probe data. BRACS, BreaKHis, PCam, PanNuke, UCLA Lung, MHIST, CoNSeP, and SurGen use the [`medarc/nanopath`](https://huggingface.co/datasets/medarc/nanopath) probe mirror for portable noninteractive setup; CPTAC-PDA OS downloads the official TCIA PathDB SVS files and builds its cache locally; PathoROB and MoNuSAC come from their official public sources. Before fetching MHIST or CoNSeP, `prepare.py` prints that users must satisfy the official upstream form/access terms first. Slide-level probes cache 20x/512 tissue grids (`tiles.parquet`, `surgen-*.parquet`, or `patches.parquet`) so `probe.py` never opens raw WSIs during training/probing; SurGen streams deterministic raster-spaced sub-bags for runtime, while CPTAC-PDA OS embeds its full cached grid.
+2. **Probe datasets**: for each empty configured root, fetches/unpacks and, where needed, pre-extracts the probe data. BRACS, BreaKHis, PCam, PanNuke, UCLA Lung, MHIST, CoNSeP, SurGen, and BoehmK PFS use the [`medarc/nanopath`](https://huggingface.co/datasets/medarc/nanopath) probe mirror for portable noninteractive setup; CPTAC-PDA OS downloads the official TCIA PathDB SVS files and builds its cache locally; PathoROB and MoNuSAC come from their official public sources. Before fetching BoehmK PFS, MHIST, or CoNSeP, `prepare.py` prints that users must satisfy the official upstream form/access terms first. Slide-level probes cache 20x/512 tissue grids (`tiles.parquet`, `surgen-*.parquet`, or `patches.parquet`) so `probe.py` never opens raw WSIs during training/probing; SurGen and BoehmK PFS stream deterministic raster-spaced sub-bags for runtime, while CPTAC-PDA OS embeds its full cached grid.
 3. **DINOv2 backbone weights**: `torch.hub.load_state_dict_from_url` fetches the Meta checkpoint for `model.type` from `dl.fbaipublicfiles.com` into `~/.cache/torch/hub/checkpoints/`.
 
 **Prerequisites**
@@ -195,13 +195,13 @@ bash download_TCGA.sh /data/TCGA 8
 python -c "
 from pathlib import Path
 from prepare import prepare_tiles, pack_from_jpeg_dir
-jpeg_dir = Path('/data/nanopath_jpegs_tmp')
+jpeg_dir = Path('/data/$USER/nanopath/nanopath_jpegs_tmp')
 prepare_tiles(Path('/data/TCGA/sample_dataset_30.txt'), jpeg_dir, split_seed=42)
-pack_from_jpeg_dir(jpeg_dir, jpeg_dir / 'manifest.txt', Path('/data/nanopath_parquet'))
+pack_from_jpeg_dir(jpeg_dir, jpeg_dir / 'manifest.txt', Path('/data/$USER/nanopath/nanopath_parquet'))
 "
 ```
 
-To publish a new variant of the dataset, you can push the resulting shards to a fresh HF dataset repo and update `HF_REPO_ID` in `prepare.py`.
+Point `data.dataset_dir` at the packed parquet directory before training. To publish a new variant of the dataset, you can push the resulting shards to a fresh HF dataset repo and update `HF_REPO_ID` in `prepare.py`.
 
 ## Running
 

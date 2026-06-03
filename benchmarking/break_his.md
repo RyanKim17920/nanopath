@@ -2,7 +2,7 @@
 
 ## Role In Nanopath
 
-`break_his` is a breast histology image-classification probe. It contributes one scalar to `mean_probe_score`: the mean of linear, KNN, and 16-shot SimpleShot validation macro F1.
+`break_his` is a breast histology image-classification probe. It feeds the README linear, KNN, and 16-shot columns with validation macro F1 scores; its per-dataset summary is the mean of those three heads.
 
 ## Source
 
@@ -42,7 +42,7 @@ The dataset score is `mean(linear_val_f1, knn_val_f1, fewshot_val_f1)`. Macro F1
 
 ## Null Distribution Audit
 
-![BreaKHis null distributions](break_his_null_distributions.png)
+![BreaKHis null distributions](null_plots/break_his_null_distributions.png)
 
 `plot_null_checks.py` generates the figure above. The orange null is a fresh current-code rerun that constructs a new DINOv2-small with randomized weights for each seed before calling `probe.py`: mean 0.342, std 0.005, max 0.350. Fixed checkpoints are shown as vertical references: DINOv2-small 0.465, DINOv2-giant 0.627, GigaPath 0.624, GenBio-PathFM 0.717, and H-optimus-0 0.750.
 

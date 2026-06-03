@@ -2,7 +2,7 @@
 
 ## Role In Nanopath
 
-`mhist` is a colorectal polyp tile-classification probe. It contributes one scalar to `mean_probe_score`: the mean of linear, KNN, and 16-shot SimpleShot validation macro F1.
+`mhist` is a colorectal polyp tile-classification probe. It feeds the README linear, KNN, and 16-shot columns with validation macro F1 scores; its per-dataset summary is the mean of those three heads.
 
 ## Source
 
@@ -42,7 +42,7 @@ The dataset score is `mean(linear_val_f1, knn_val_f1, fewshot_val_f1)`. Macro F1
 
 ## Null Distribution Audit
 
-![MHIST null distributions](mhist_null_distributions.png)
+![MHIST null distributions](null_plots/mhist_null_distributions.png)
 
 `plot_null_checks.py` generates the figure above. The orange null is a fresh current-code rerun that constructs a new DINOv2-small with randomized weights for each seed before calling `probe.py`: mean 0.577, std 0.008, max 0.594. Fixed checkpoints are shown as vertical references: DINOv2-small 0.772, DINOv2-giant 0.800, GigaPath 0.779, GenBio-PathFM 0.794, and H-optimus-0 0.793.
 
@@ -50,4 +50,4 @@ This is a strong null check. The randomized-weight architecture can extract some
 
 ## Difference From Original Usage
 
-MHIST ships with its own agreement-gated access path and task framing. Nanopath uses a checked-in split of the official training partition for fast frozen-backbone validation and keeps test metadata out of `mean_probe_score`. The task is only binary, but HP-vs-SSA is a real diagnostic distinction rather than a trivial tumor/normal contrast; the null audit shows randomized weights already capture some low-level signal, so small gains should be interpreted with the usual 0.01 benchmark-noise threshold.
+MHIST ships with its own agreement-gated access path and task framing. Nanopath uses a checked-in split of the official training partition for fast frozen-backbone validation and keeps test metadata out of `mean_probe_score`. The task is only binary, but HP-vs-SSA is a real diagnostic distinction rather than a trivial tumor/normal contrast; the null audit shows randomized weights already capture some low-level signal, so small gains should be interpreted with the usual 0.006 benchmark-noise threshold.

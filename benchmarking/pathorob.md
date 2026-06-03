@@ -2,7 +2,7 @@
 
 ## Role In Nanopath
 
-`pathorob` is a robustness probe. It contributes one scalar to `mean_probe_score`: the mean of the camelyon and tolkach_esca robustness indices.
+`pathorob` is a robustness probe. It contributes the mean of the camelyon and tolkach_esca robustness indices to the README robustness column.
 
 ## Source
 
@@ -34,7 +34,7 @@ The implementation counts same-biology/different-center neighbors (`SO`) and dif
 
 ## Null Distribution Audit
 
-![PathoROB null distributions](pathorob_null_distributions.png)
+![PathoROB null distributions](null_plots/pathorob_null_distributions.png)
 
 `plot_null_checks.py` generates the figure above. The orange null is a fresh current-code rerun that constructs a new DINOv2-small with randomized weights for each seed before calling `probe.py`: mean 0.194, std 0.003, max 0.199. Fixed checkpoints are shown as vertical references: DINOv2-small 0.754, DINOv2-giant 0.798, GigaPath 0.745, GenBio-PathFM 0.941, and H-optimus-0 0.893.
 

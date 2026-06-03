@@ -2,7 +2,7 @@
 
 ## Role In Nanopath
 
-`consep` is a colorectal nucleus segmentation probe. It contributes one scalar to `mean_probe_score`: validation macro Jaccard.
+`consep` is a colorectal nucleus segmentation probe. It contributes validation macro Jaccard to the README segmentation column.
 
 ## Source
 
@@ -30,7 +30,7 @@ The archive may include `Test`, but `probe.py` does not read it.
 
 ## Null Distribution Audit
 
-![CoNSeP null distributions](consep_null_distributions.png)
+![CoNSeP null distributions](null_plots/consep_null_distributions.png)
 
 `plot_null_checks.py` generates the figure above. The orange null is a fresh current-code rerun that constructs a new DINOv2-small with randomized weights for each seed before calling `probe.py`: mean 0.228, std 0.000, max 0.228. Fixed checkpoints are shown as vertical references: DINOv2-small 0.202, DINOv2-giant 0.217, GigaPath 0.237, GenBio-PathFM 0.231, and H-optimus-0 0.222.
 

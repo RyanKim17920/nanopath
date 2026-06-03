@@ -41,7 +41,7 @@ NANOPATH_LOCKED_PROBE_CONFIG = {
     "segmentation_datasets": ["pannuke", "monusac", "consep"],
     "slide_datasets": ["ucla_lung"],
     "auc_datasets": ["surgen"],
-    "survival_datasets": ["cptac_pda_os"],
+    "survival_datasets": ["boehmk_pfs", "cptac_pda_os"],
     "robustness_datasets": ["pathorob"],
 }
 LARGE_DIFF_SUFFIXES = (
@@ -371,18 +371,18 @@ def collect_source_snapshot(main_ref: dict[str, str], summary: dict[str, Any], o
     source = str(meta.get("source_artifact") or f"nanopath-source-{meta.get('id', 'local')}")
     local_source_dir = output_dir / "labless_source"
     source_dir = Path(os.path.expandvars(str(opts.get("source_dir") or (local_source_dir if local_source_dir.exists() else meta.get("source_dir") or local_source_dir)))).expanduser().resolve()
-    return collect_source_context(main_ref, summary, source_dir, source, opts.get("source_commit") or opts.get("commit") or git_meta.get("commit"), git_meta)
+    return collect_source_context(main_ref, summary, source_dir, source, opts.get("source_commit") or opts.get("commit") or git_meta.get("commit"), git_meta, opts.get("review_config"))
 
 
-def collect_source_context(main_ref: dict[str, str], summary: dict[str, Any], source_dir: Path, source: str, commit_value: Any, git_meta: dict[str, Any]) -> dict[str, Any]:
+def collect_source_context(main_ref: dict[str, str], summary: dict[str, Any], source_dir: Path, source: str, commit_value: Any, git_meta: dict[str, Any], review_config: str | None) -> dict[str, Any]:
     if not source_dir.exists():
         raise ValueError(f"source snapshot does not exist: {source_dir}")
     commit = str(commit_value or "")
     if not GIT_SHA_RE.match(commit):
         raise ValueError("source metadata is missing a full 40-character git commit")
-    root = Path.cwd()
-    config_path = Path(summary.get("config_path") or "configs/main.yaml")
-    config_rel = str(config_path.relative_to(root)) if config_path.is_absolute() else str(config_path)
+    config_rel = public_config_path(review_config or summary.get("config_path") or "configs/main.yaml")
+    if not (source_dir / config_rel).exists():
+        raise ValueError(f"config snapshot missing: {config_rel}")
     subprocess.run(["git", "cat-file", "-e", f"{main_ref['commit']}^{{commit}}"], check=True)
     review_paths = [*REVIEW_DIFF_PATHS, *([] if config_rel in REVIEW_DIFF_PATHS else [config_rel])]
     main_diff = collect_main_diff(main_ref, commit, source_dir, review_paths)
@@ -425,14 +425,14 @@ def review_path_allowed(path: str) -> bool:
 
 
 def new_source_path_blocked(path: str) -> bool:
-    return Path(path).suffix.lower() in {".py", ".pyi", ".yaml", ".yml"} and not review_path_allowed(path)
+    return not path.startswith("labless/") and Path(path).suffix.lower() in {".py", ".pyi", ".yaml", ".yml"} and not review_path_allowed(path)
 
 
 def changed_source_paths(commit: str, source_dir: Path) -> list[str]:
     source_files = [
         p.relative_to(source_dir).as_posix()
         for p in source_dir.rglob("*")
-        if p.is_file() and p.name != "manifest.json"
+        if p.is_file() and p.name != "manifest.json" and not p.relative_to(source_dir).as_posix().startswith("labless/")
     ]
     main_files = subprocess.check_output(["git", "ls-tree", "-r", "--name-only", commit, "--", *REVIEW_DIFF_PATHS, *LOCKED_PATHS], text=True).splitlines()
     paths = sorted(set(source_files + main_files))
@@ -546,7 +546,7 @@ def file_diff(path: str, main_data: bytes | None, source_data: bytes | None) -> 
 
 
 def locked_path_changes(commit: str, source_dir: Path) -> list[str]:
-    source_files = [p.relative_to(source_dir).as_posix() for p in source_dir.rglob("*") if p.is_file() and p.name != "manifest.json"]
+    source_files = [p.relative_to(source_dir).as_posix() for p in source_dir.rglob("*") if p.is_file() and p.name != "manifest.json" and not p.relative_to(source_dir).as_posix().startswith("labless/")]
     main_files = subprocess.check_output(["git", "ls-tree", "-r", "--name-only", commit, "--", *LOCKED_PATHS], text=True).splitlines()
     locked_files = sorted(path for path in set(source_files + main_files) if any(path == lock.rstrip("/") or path.startswith(lock) for lock in LOCKED_PATHS))
     return [path for path in locked_files if main_file(commit, path) != snapshot_file(source_dir, path)]

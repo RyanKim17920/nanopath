@@ -2,7 +2,7 @@
 
 ## Role In Nanopath
 
-`pannuke` is a multi-organ nucleus segmentation probe. It contributes one scalar to `mean_probe_score`: validation macro Jaccard.
+`pannuke` is a multi-organ nucleus segmentation probe. It contributes validation macro Jaccard to the README segmentation column.
 
 ## Source
 
@@ -28,7 +28,7 @@ Fold3 has 2,722 images in the full release, but it is not downloaded by `prepare
 
 ## Null Distribution Audit
 
-![PanNuke null distributions](pannuke_null_distributions.png)
+![PanNuke null distributions](null_plots/pannuke_null_distributions.png)
 
 `plot_null_checks.py` generates the figure above. The orange null is a fresh current-code rerun that constructs a new DINOv2-small with randomized weights for each seed before calling `probe.py`: mean 0.309, std 0.010, max 0.325. Fixed checkpoints are shown as vertical references: DINOv2-small 0.359, DINOv2-giant 0.370, GigaPath 0.418, GenBio-PathFM 0.413, and H-optimus-0 0.412.
 

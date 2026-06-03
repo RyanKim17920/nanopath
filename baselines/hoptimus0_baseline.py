@@ -34,7 +34,7 @@ def load_probe_model(checkpoint_path, device):
 
 def main():
     usage = "usage: python baselines/hoptimus0_baseline.py [config.yaml] [checkpoint_path=/path] [output_dir=/path]"
-    config_path = REPO_DIR / "configs" / "leader.yaml"
+    config_path = REPO_DIR / "configs" / "main.yaml"
     checkpoint_path = Path("/data/H-optimus-0/pytorch_model.bin")
     output_dir = Path(os.path.expandvars("/data/$USER/nanopath/baselines/hoptimus0"))
     for arg in sys.argv[1:]:

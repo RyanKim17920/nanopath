@@ -24,7 +24,7 @@ Coding guidelines:
 Experiment and benchmark discipline:
 - Validate opinions experimentally whenever feasible. Run code, tests, probes, or short jobs that directly support the conclusion.
 - Use downstream probing as the main comparison signal because objectives like JEPA, MAE, DINO, and iBOT may not have comparable validation losses.
-- An improvement should only actually be considered an improvement mean_probe_score improves over .01, anything less is within random variance.
+- An improvement should only actually be considered an improvement when mean_probe_score improves by at least .006; anything less is within random variance.
 - Use wandb for logging, plotting, and utilization monitoring throughout pretraining. Log all metrics needed to validate training behavior (i.e., gradient norm).
 - Aim for >80% GPU utilization during GPU runs; investigate and remedy code when utilization is poor.
 - After any completed full run or frozen baseline evaluation worth sharing, run `./labless/submit_to_labless.py output_dir=... run_name=... notes=...`; the submitter signs in through GitHub's no-scope device flow, labless records the verified GitHub login, and each login can submit at most 10 runs per 24 hours. Full submissions require `summary.json`, `metrics.jsonl`, `summary.max_train_samples == 1000000`, `summary.tile_presentations <= 1000000`, and `summary.max_train_flops == 1e18`. Keep smoke checks and failed runs local.

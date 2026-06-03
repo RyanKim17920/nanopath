@@ -2,7 +2,7 @@
 
 ## Role In Nanopath
 
-`monusac` is a nucleus segmentation probe. It contributes one scalar to `mean_probe_score`: validation macro Jaccard.
+`monusac` is a nucleus segmentation probe. It contributes validation macro Jaccard to the README segmentation column.
 
 ## Source
 
@@ -25,7 +25,7 @@ MoNuSAC is a multi-organ nuclei segmentation and classification challenge datase
 
 ## Null Distribution Audit
 
-![MoNuSAC null distributions](monusac_null_distributions.png)
+![MoNuSAC null distributions](null_plots/monusac_null_distributions.png)
 
 `plot_null_checks.py` generates the figure above. The orange null is a fresh current-code rerun that constructs a new DINOv2-small with randomized weights for each seed before calling `probe.py`: mean 0.254, std 0.013, max 0.272. Fixed checkpoints are shown as vertical references: DINOv2-small 0.238, DINOv2-giant 0.265, GigaPath 0.308, GenBio-PathFM 0.332, and H-optimus-0 0.339.
 

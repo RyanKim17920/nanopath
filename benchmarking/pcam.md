@@ -2,7 +2,7 @@
 
 ## Role In Nanopath
 
-`pcam` is a lymph-node metastasis tile-classification probe derived from PatchCamelyon. It contributes one scalar to `mean_probe_score`: the mean of linear, KNN, and 16-shot SimpleShot validation macro F1.
+`pcam` is a lymph-node metastasis tile-classification probe derived from PatchCamelyon. It feeds the README linear, KNN, and 16-shot columns with validation macro F1 scores; its per-dataset summary is the mean of those three heads.
 
 ## Source
 
@@ -34,7 +34,7 @@ The dataset score is `mean(linear_val_f1, knn_val_f1, fewshot_val_f1)`. The offi
 
 ## Null Distribution Audit
 
-![PCam null distributions](pcam_null_distributions.png)
+![PCam null distributions](null_plots/pcam_null_distributions.png)
 
 `plot_null_checks.py` generates the figure above. The orange null is a fresh current-code rerun that constructs a new DINOv2-small with randomized weights for each seed before calling `probe.py`: mean 0.730, std 0.008, max 0.743. Fixed checkpoints are shown as vertical references: DINOv2-small 0.794, DINOv2-giant 0.775, GigaPath 0.918, GenBio-PathFM 0.912, and H-optimus-0 0.908.
 
@@ -42,4 +42,4 @@ This audit shows a high random-feature floor, likely because PCam's small fixed 
 
 ## Difference From Original Usage
 
-THUNDER lists the full official train/valid/test sets for PCam. Nanopath deliberately uses a small deterministic train/valid subset from those official H5 files so the full 11-dataset probe remains inside the final H100 window. This is a runtime adaptation, not an exact full-sample THUNDER PCam run. Because the random-feature null is high, PCam is best interpreted as a sanity-check metastasis morphology probe where large pathology-pretrained gains matter, not as a sensitive detector of tiny backbone changes.
+THUNDER lists the full official train/valid/test sets for PCam. Nanopath deliberately uses a small deterministic train/valid subset from those official H5 files so the full probe remains inside the final H100 window. This is a runtime adaptation, not an exact full-sample THUNDER PCam run. Because the random-feature null is high, PCam is best interpreted as a sanity-check metastasis morphology probe where large pathology-pretrained gains matter, not as a sensitive detector of tiny backbone changes.

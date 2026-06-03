@@ -1,11 +1,9 @@
-# Inline downstream probes. mean_probe_score = the unweighted mean of one scalar
-# per headline dataset: break_his, bracs, mhist, pcam, monusac, consep,
-# pannuke, ucla_lung, surgen, cptac_pda_os, pathorob. Tile classification
-# datasets score the mean of linear, KNN, and 16-shot SimpleShot F1
-# majority-voted over 1000 deterministic support sets.
-# PathoBench-derived slide classification and SurGen score AUROC; CPTAC-PDA survival
-# scores Harrell's c-index; PathoROB scores its robustness index; segmentation
-# datasets score macro Jaccard from the MaskTransformer head below.
+# Inline downstream probes. mean_probe_score is the unweighted mean of the
+# README columns: linear, KNN, 16-shot, segmentation, progression, mutation,
+# survival, and robustness. Tile classification datasets feed the first three
+# columns; segmentation datasets score macro Jaccard; PathoBench-derived slide
+# classification/mutation score AUROC; survival scores Harrell's c-index; and
+# PathoROB scores its robustness index.
 #
 # train.py can snapshot a probe checkpoint at each FLOP milestone to run
 # this file as a subprocess (`python probe.py req.json`), whereby training pauses,
@@ -20,7 +18,8 @@
 #   pcam        ~28-50s      fixed 3072 train / 768 val subset of official H5 files
 #   ucla_lung   ~32-140s     full IDR idr0082 tissue grid, mean-pooled
 #   surgen      ~235-1137s   deterministic SR386 sub-bags -> mean-pool -> logistic regression
-#   cptac_pda_os ~164s       full deterministic tile grid -> case-pool -> CoxPH/PCA2
+#   boehmk_pfs   ~99-2361s   deterministic 768-tile sub-bag -> case-pool -> z-scored CoxPH
+#   cptac_pda_os ~150-2286s  full deterministic tile grid -> case-pool -> z-scored CoxPH
 #   pathorob    ~28-198s     camelyon + tolkach_esca patch sets
 #   monusac     ~25-93s      3 train-derived folds, features extracted once
 #   consep      ~5-19s       3 train-derived folds, features extracted once
@@ -74,12 +73,13 @@ CLASSIFICATION_DATASETS = ["bracs", "break_his", "mhist", "pcam"]
 SEGMENTATION_DATASETS = ["pannuke", "monusac", "consep"]
 SLIDE_DATASETS = ["ucla_lung"]
 AUC_DATASETS = ["surgen"]
-SURVIVAL_DATASETS = ["cptac_pda_os"]
+SURVIVAL_DATASETS = ["boehmk_pfs", "cptac_pda_os"]
 ROBUSTNESS_DATASETS = ["pathorob"]
 MEAN_PROBE_DATASETS = [
     "break_his", "bracs", "mhist", "pcam", "monusac", "consep",
-    "pannuke", "ucla_lung", "surgen", "cptac_pda_os", "pathorob",
+    "pannuke", "ucla_lung", "surgen", "boehmk_pfs", "cptac_pda_os", "pathorob",
 ]
+MEAN_PROBE_METRICS = ["linear_mean_f1", "knn_mean_f1", "fewshot_mean_f1", "seg_mean_jaccard", "slide_mean_auc", "auc_mean", "survival_mean_cindex", "robustness_mean"]
 TASK_FIELDS = {
     "classification_datasets": ("datasets", CLASSIFICATION_DATASETS),
     "segmentation_datasets": ("segmentation_datasets", SEGMENTATION_DATASETS),
@@ -93,10 +93,9 @@ SURGEN_LR_MAX_ITER = 5000
 SURGEN_LR_SOLVER = "liblinear"
 SURGEN_TILES_PER_SLIDE = 768
 SURGEN_ROW_GROUP_SIZE = 64
-SURVIVAL_TILES_PER_SLIDE_CAP = 0  # logged as 0 to mean "uncapped"
+SURVIVAL_TILES_PER_SLIDE_CAPS = {"boehmk_pfs": 768, "cptac_pda_os": 0}  # 0 means uncapped.
 SLIDE_LR_CS = (0.001, 0.01, 0.1, 0.5, 1.0, 10.0, 100.0)
-SURVIVAL_COXPH_ALPHA = 100.0
-SURVIVAL_PCA_COMPONENTS = 2
+SURVIVAL_COXPH_ALPHA = 2.0
 PATHOROB_SUBSETS = {"camelyon": 11, "tolkach_esca": 46}
 # Module-level so dataset adapters can read roots without threading cfg through every call.
 # Populated from cfg.probe.dataset_roots by prepare_probe_state() and run_probe_job().
@@ -155,7 +154,7 @@ def prepare_probe_state(cfg, output_dir):
         path.mkdir(parents=True, exist_ok=True)
     groups = {request_key: [str(x) for x in cfg["probe"].get(cfg_key, [])] for request_key, (cfg_key, _) in TASK_FIELDS.items()}
     data = {
-        "version": 11,
+        "version": 12,
         "family": str(cfg["project"]["family"]),
         "count": int(cfg["probe"]["count"]),
         "logged_results": [],
@@ -164,7 +163,7 @@ def prepare_probe_state(cfg, output_dir):
     if paths["state_path"].exists():
         # Explicit resume can continue only if the probe family/datasets/count match the old state.
         previous = json.loads(paths["state_path"].read_text())
-        if previous["version"] != 11:
+        if previous["version"] != 12:
             raise ValueError(f"unsupported probe state version: {previous['version']}")
         if previous["family"] != data["family"]:
             raise ValueError(f"probe family changed from {previous['family']} to {data['family']}")
@@ -706,17 +705,23 @@ def inline_pathobench_survival(model, mean, std, dataset, device, transform):
     import numpy as np
     import pyarrow.parquet as pq
     from PIL import Image
-    from sklearn.decomposition import PCA
     from sksurv.linear_model import CoxPHSurvivalAnalysis
     from sksurv.metrics import concordance_index_censored
 
     started_at = time.monotonic()
     spec = json.loads((BENCHMARKING_DIR / f"{dataset}.json").read_text())
-    case_ids = list(spec["case_ids"])
-    case_slides = [list(x) for x in spec["case_slides"]]
-    pool_slides = [sid for slides in case_slides for sid in slides]
-    pool_events = np.asarray([bool(e) for e in spec["events"]])
-    pool_days = np.asarray([float(d) for d in spec["days"]])
+    if "case_ids" in spec:
+        unit_ids = list(spec["case_ids"])
+        unit_slides = [list(x) for x in spec["case_slides"]]
+        pool_events = np.asarray([bool(e) for e in spec["events"]])
+        pool_days = np.asarray([float(d) for d in spec["days"]])
+    else:
+        splits = [sid for split in ("train", "val") for sid in spec[split]["slide_ids"]]
+        unit_ids = [str(x) for split in ("train", "val") for x in spec[split].get("case_ids", spec[split]["slide_ids"])]
+        unit_slides = [[sid] for sid in splits]
+        pool_events = np.asarray([bool(e) for split in ("train", "val") for e in spec[split]["events"]])
+        pool_days = np.asarray([float(d) for split in ("train", "val") for d in spec[split]["days"]])
+    pool_slides = [sid for slides in unit_slides for sid in slides]
     needed = set(pool_slides)
     pf = pq.ParquetFile(DATASET_ROOTS[dataset] / "patches.parquet")
     slide_col = pf.schema_arrow.get_field_index("slide_id")
@@ -727,7 +732,14 @@ def inline_pathobench_survival(model, mean, std, dataset, device, transform):
         for sid in sids:
             if sid in needed:
                 row_groups[sid].append(rg)
-    selected_groups = sorted({rg for sid in pool_slides for rg in row_groups[sid]})
+    cap = SURVIVAL_TILES_PER_SLIDE_CAPS[dataset]
+    groups_per_slide = (cap + pf.metadata.row_group(0).num_rows - 1) // pf.metadata.row_group(0).num_rows if cap else None
+    selected_groups = set()
+    for sid in pool_slides:
+        groups = row_groups[sid]
+        take = range(len(groups)) if groups_per_slide is None or len(groups) <= groups_per_slide else np.linspace(0, len(groups) - 1, groups_per_slide, dtype=np.int64)
+        selected_groups.update(groups[int(i)] for i in take)
+    selected_groups = sorted(selected_groups)
 
     class _Tiles(torch.utils.data.IterableDataset):
         def __iter__(self):
@@ -754,25 +766,23 @@ def inline_pathobench_survival(model, mean, std, dataset, device, transform):
                 tiles += 1
 
     slide_vecs = {sid: sums[sid] / counts[sid] for sid in pool_slides}
-    X = np.stack([np.stack([slide_vecs[sid] for sid in slides]).mean(0) for slides in case_slides]).astype(np.float64)
+    X = np.stack([np.stack([slide_vecs[sid] for sid in slides]).mean(0) for slides in unit_slides]).astype(np.float64)
     y = np.array(list(zip(pool_events, pool_days)), dtype=[("event", bool), ("days", float)])
-    case_to_i = {case_id: i for i, case_id in enumerate(case_ids)}
+    if "folds" in spec:
+        case_to_i = {case_id: i for i, case_id in enumerate(unit_ids)}
+        fold_indices = [(np.asarray([case_to_i[c] for c in fold["train"]], dtype=np.int64), np.asarray([case_to_i[c] for c in fold["test"]], dtype=np.int64)) for fold in spec["folds"]]
+    else:
+        fold_indices = stratified_folds(pool_events.astype(np.int64))
     folds = []
-    for fold in spec["folds"]:
-        tr = np.asarray([case_to_i[c] for c in fold["train"]], dtype=np.int64)
-        va = np.asarray([case_to_i[c] for c in fold["test"]], dtype=np.int64)
-        # The survival head is deliberately low-dimensional. Random-init audits
-        # found high-dimensional Coxnet could inflate c-index; train-fold z-score
-        # + PCA(2) keeps the Cox head scale-invariant and small.
+    for tr, va in fold_indices:
+        # Train-fold z-scoring makes the fixed ridge penalty comparable across dimensions and encoders.
         mu, sd = X[tr].mean(0), X[tr].std(0) + 1e-8
         Xtr, Xva = (X[tr] - mu) / sd, (X[va] - mu) / sd
-        pca = PCA(n_components=SURVIVAL_PCA_COMPONENTS, random_state=0).fit(Xtr)
-        Xtr, Xva = pca.transform(Xtr), pca.transform(Xva)
         head = CoxPHSurvivalAnalysis(alpha=SURVIVAL_COXPH_ALPHA, n_iter=1000).fit(Xtr, y[tr])
         cindex = float(concordance_index_censored(y[va]["event"], y[va]["days"], head.predict(Xva))[0])
         folds.append({"val_cindex": cindex, "train_cases": len(tr), "test_cases": len(va)})
     val_cindex = float(np.mean([f["val_cindex"] for f in folds]))
-    return {"val_cindex": val_cindex, "best_alpha": SURVIVAL_COXPH_ALPHA, "pca_components": SURVIVAL_PCA_COMPONENTS, "fold_scores": [float(f["val_cindex"]) for f in folds], "folds": folds, "tiles": tiles, "tiles_per_slide_cap": SURVIVAL_TILES_PER_SLIDE_CAP}, time.monotonic() - started_at
+    return {"val_cindex": val_cindex, "coxph_alpha": SURVIVAL_COXPH_ALPHA, "fold_scores": [float(f["val_cindex"]) for f in folds], "folds": folds, "tiles": tiles, "tiles_per_slide_cap": cap}, time.monotonic() - started_at
 
 
 # KNN probe over frozen embeddings; best k is selected on the validation split.
@@ -1025,7 +1035,7 @@ def run_probe_job(request_path):
         print(f"{console_prefix()} ProbeWorker  [{request['train_step']}]  inline_survival_start: {dataset}", flush=True)
         result, wall = inline_pathobench_survival(model, mean, std, dataset, device, patch_transform)
         survival_metrics[dataset] = result
-        print(f"{console_prefix()} ProbeWorker  [{request['train_step']}]  inline_survival_done: {dataset}  cindex={result['val_cindex']:.4f}  coxph_alpha={result['best_alpha']}  pca={result['pca_components']}  wall={wall:.2f}s", flush=True)
+        print(f"{console_prefix()} ProbeWorker  [{request['train_step']}]  inline_survival_done: {dataset}  cindex={result['val_cindex']:.4f}  coxph_alpha={result['coxph_alpha']}  wall={wall:.2f}s", flush=True)
 
     rob_indices = {}
     for dataset in robustness:
@@ -1085,8 +1095,7 @@ def run_probe_job(request_path):
         results[dataset] = auc_metrics[dataset]
     for dataset in survival:
         metrics[f"probe_{dataset}_val_cindex"] = survival_metrics[dataset]["val_cindex"]
-        metrics[f"probe_{dataset}_coxph_alpha"] = survival_metrics[dataset]["best_alpha"]
-        metrics[f"probe_{dataset}_pca_components"] = survival_metrics[dataset]["pca_components"]
+        metrics[f"probe_{dataset}_coxph_alpha"] = survival_metrics[dataset]["coxph_alpha"]
         metrics[f"probe_{dataset}_tiles"] = survival_metrics[dataset]["tiles"]
         metrics[f"probe_{dataset}_tiles_per_slide_cap"] = survival_metrics[dataset]["tiles_per_slide_cap"]
         per_dataset_score[dataset] = survival_metrics[dataset]["val_cindex"]
@@ -1122,12 +1131,12 @@ def run_probe_job(request_path):
     if robustness:
         metrics["robustness_mean"] = sum(metrics[f"probe_{d}_robustness_index"] for d in robustness) / len(robustness)
 
-    headline = [per_dataset_score[d] for d in MEAN_PROBE_DATASETS]
-    metrics["mean_probe_score"] = sum(headline) / len(headline)
+    if all(k in metrics for k in MEAN_PROBE_METRICS):
+        metrics["mean_probe_score"] = sum(metrics[k] for k in MEAN_PROBE_METRICS) / len(MEAN_PROBE_METRICS)
 
     print(
         f"{console_prefix()} ProbeWorker  [{request['train_step']}]  "
-        f"result: mean_probe_score={metrics['mean_probe_score']:.6f}  "
+        f"result: mean_probe_score={metrics.get('mean_probe_score')}  "
         f"linear={metrics.get('linear_mean_f1')}  knn={metrics.get('knn_mean_f1')}  "
         f"fewshot={metrics.get('fewshot_mean_f1')}  slide={metrics.get('slide_mean_auc')}  seg={metrics.get('seg_mean_jaccard')}  "
         f"auc={metrics.get('auc_mean')}  survival={metrics.get('survival_mean_cindex')}  "

@@ -2,7 +2,7 @@
 
 ## Role In Nanopath
 
-`ucla_lung` is a lung slide-level progression/regression classification probe. It contributes one scalar to `mean_probe_score`: validation AUROC from a balanced logistic linear probe on mean-pooled slide embeddings.
+`ucla_lung` is a lung slide-level progression/regression classification probe. It contributes validation AUROC from a balanced logistic linear probe on mean-pooled slide embeddings to the README progression column.
 
 ## Source
 
@@ -32,7 +32,7 @@ Within the train pool, label 0 has 35 slides and label 1 has 55 slides. The held
 
 ## Null Distribution Audit
 
-![UCLA Lung null distributions](ucla_lung_null_distributions.png)
+![UCLA Lung null distributions](null_plots/ucla_lung_null_distributions.png)
 
 `plot_null_checks.py` generates the figure above. The orange null is a fresh current-code rerun that constructs a new DINOv2-small with randomized weights for each seed before calling `probe.py`: mean 0.692, std 0.004, max 0.700. Fixed checkpoints are shown as vertical references: DINOv2-small 0.583, DINOv2-giant 0.600, GigaPath 0.704, H-optimus-0 0.700, and GenBio-PathFM 0.768.
 

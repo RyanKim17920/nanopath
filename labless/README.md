@@ -94,6 +94,7 @@ Arguments are `key=value`; there is no `argparse`.
 | `tier` | `full` or `baseline`; inferred when omitted. |
 | `hardware` | Override detected hardware string. |
 | `source_dir` / `source_commit` | Manual repair knobs for copied or older runs; normally inferred from `output_dir/labless_source` and `summary.json`. |
+| `review_config` | Repo-relative `configs/*.yaml` to review when `summary.config_path` points at an external launched copy. |
 | `dry_run=true` | Write `labless_submission.json` without posting. |
 | `api_url` | Use a local labless backend for testing. |
 | `main_run_id` / `main_commit` | Local testing override for the live main lookup; both are required when either is set. |

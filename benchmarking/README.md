@@ -3,16 +3,16 @@ This folder contains code specific for probing/downstream evaluation. The normal
 
 ## Metric
 
-`mean_probe_score` is the unweighted mean of one scalar per dataset and is the single score we use to assess relative performance of trained nanopath models.
+`mean_probe_score` is the unweighted mean of the eight public README columns, so the final score can be recomputed directly from the table.
 
 ```text
 mean_probe_score = mean(
-  break_his, bracs, mhist, pcam,
-  monusac, consep, pannuke,
-  ucla_lung,
-  surgen,
-  cptac_pda_os,
-  pathorob
+  linear, knn, 16-shot,
+  segmentation,
+  progression,
+  mutation,
+  survival,
+  robustness
 )
 ```
 
@@ -20,31 +20,31 @@ mean_probe_score = mean(
 
 | family | datasets | dataset scalar |
 |---|---|---|
-| Tile classification | `break_his`, `bracs`, `mhist`, `pcam` | mean of linear, KNN, and 16-shot SimpleShot macro F1|
+| Tile classification | `break_his`, `bracs`, `mhist`, `pcam` | separate column means for linear, KNN, and 16-shot SimpleShot macro F1 |
 | Segmentation | `monusac`, `consep`, `pannuke` | macro Jaccard from a small MaskTransformer head on frozen patch tokens |
 | Progression | `ucla_lung` | AUROC from a balanced logistic linear probe on mean-pooled slide embeddings |
 | Mutation | `surgen` | AUROC for PathoBench SR386 RAS mutation status |
-| Survival | `cptac_pda_os` | Harrell's c-index from official PathoBench folds with fixed PCA(2) L2 CoxPH |
+| Survival | `boehmk_pfs`, `cptac_pda_os` | mean Harrell's c-index from train-fold z-scored fixed-ridge CoxPH survival probes |
 | Robustness | `pathorob` | mean PathoROB-style robustness index across camelyon and tolkach_esca |
 
 All probes keep the backbone frozen. Probe heads are intentionally small: they measure representation quality, not downstream fine-tuning capacity.
 
 Probe heads consume each model's native frozen feature dimension rather than projecting every backbone to a common width. This intentionally evaluates each checkpoint as a deployed feature extractor, but it also means dimensionality is part of the baseline comparison: DINOv2-small emits 384-d features, DINOv2-G/OpenMidnight/H-optimus-0/UNI-2-h/GigaPath emit 1536-d features, Virchow emits 2560-d CLS plus mean-patch features, Midnight-12K emits 3072-d CLS plus mean-patch features, and GenBio-PathFM emits 4608-d features.
 
-Linear, KNN, segmentation-head, and logistic hyperparameters are selected on the same internal validation splits that define `mean_probe_score`. Thunder-derived tile classifiers keep Thunder-style linear/KNN/16-shot SimpleShot heads; SimpleShot precomputes 1000 deterministic support sets and majority-votes query predictions. PathoBench-derived slide classifiers use balanced logistic linear probing; SurGen uses sklearn's `liblinear` solver. CPTAC-PDA OS uses fixed `z-score -> PCA(2) -> CoxPH(alpha=100)` on each official PathoBench fold after case-level slide pooling; the head is fixed because Coxnet sweeps inflated random-init survival scores during validation.
+Linear, KNN, segmentation-head, and logistic hyperparameters are selected on the same internal validation splits that define their columns. Thunder-derived tile classifiers keep Thunder-style linear/KNN/16-shot SimpleShot heads; SimpleShot precomputes 1000 deterministic support sets and majority-votes query predictions. PathoBench-derived slide classifiers use balanced logistic linear probing; SurGen uses sklearn's `liblinear` solver. Survival mean-pools tiles to slides and slides to cases, applies train-fold z-scoring, then fits fixed `CoxPHSurvivalAnalysis(alpha=2.0)` on the full pooled feature matrix with no dimensionality reduction, elastic-net sparsity, or alpha sweep. The fixed ridge penalty preserves all embedding dimensions, and standardization keeps that penalty comparable across dimensions and encoders.
 
 ## Runtime Strategy
 
 The full suite is designed to stay lightweight for the standard small Nanopath model by keeping the benchmark small where it can be small, and precomputing expensive slide tiling.
 
-- Whole-slide tasks use cached tile grids, so the final probe embeds JPEG/parquet tiles rather than opening full WSIs. PathoBench-derived slide tasks use a 20x, 512 px, 0-overlap tissue grid following the Trident/PathoBench tutorial contract. UCLA Lung and CPTAC-PDA OS embed the full cached grid; SurGen streams deterministic up-to-768-tile raster-spaced sub-bags per slide so the larger mutation task fits the final-probe window. UCLA Lung and SurGen use pre-extracted parquet caches by default; CPTAC-PDA OS downloads TCIA PathDB SVS files and builds its cache locally. The remaining preprocessing simplification is a deterministic thumbnail tissue mask instead of invoking Trident's HEST segmentation model during `prepare.py`.
+- Whole-slide tasks use cached tile grids, so the final probe embeds JPEG/parquet tiles rather than opening full WSIs. PathoBench-derived slide tasks use a 20x, 512 px, 0-overlap tissue grid following the Trident/PathoBench tutorial contract. UCLA Lung and CPTAC-PDA OS embed the full cached grid; SurGen and BoehmK PFS stream deterministic up-to-768-tile raster-spaced sub-bags per slide so larger slide tasks fit the final-probe window. UCLA Lung, SurGen, and BoehmK PFS use pre-extracted parquet caches by default; CPTAC-PDA OS downloads TCIA PathDB SVS files and builds its cache locally. The remaining preprocessing simplification is a deterministic thumbnail tissue mask instead of invoking Trident's HEST segmentation model during `prepare.py`.
 - PCam is a fixed subset of the official train/valid H5 files, mirrored as small H5s with the same filenames/schema.
 - Tile classifiers use `Resize((224, 224))` from `model.py::probe_transforms` for trained Nanopath checkpoints. Frozen baseline scripts set their own `probe.transform_policy`; Virchow and GigaPath use their official timm bicubic 224 center-crop. Patch-cache probes keep square resize because their inputs are already extracted tissue tiles.
 - Segmentation runs in a background thread while classification, slide, survival, and robustness probes run in the main worker for DINOv2-style backbones. CUDA kernels still serialize, but CPU-heavy decode/head work overlaps with segmentation head training.
 - The same loaded frozen backbone serves every probe in one subprocess, avoiding repeated model load overhead.
 - Official held-out test splits are not read by most probes. `cptac_pda_os` is the exception: PathoBench defines the survival task by five official train/test folds, and Nanopath reports their mean c-index.
 
-Recent H100 timings from the latest untouched baseline reruns:
+Recent H100 timings from the latest untouched baseline reruns; survival rows are the June 2, 2026 train-fold z-scored fixed-ridge CoxPH reruns:
 
 | dataset | DINOv2-random | DINOv2-small | DINOv2-G | EXAONE-Path | Virchow | GigaPath | UNI-2-h | Midnight-12K | OpenMidnight | H-optimus-0 | GenBio-PathFM |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -57,10 +57,11 @@ Recent H100 timings from the latest untouched baseline reruns:
 | `consep` | 4.2s | 4.8s | 36.9s | 4.4s | 26.1s | 13.0s | 34.3s | 32.6s | 36.0s | 35.6s | 5.4s |
 | `ucla_lung` | 26.9s | 26.7s | 63.2s | 26.1s | 46.4s | 48.4s | 44.3s | 62.8s | 64.8s | 63.3s | 139.3s |
 | `surgen` | 194.2s | 198.6s | 413.2s | 193.9s | 255.0s | 287.6s | 251.1s | 398.0s | 425.5s | 400.1s | 1131.9s |
-| `cptac_pda_os` | 169.7s | 163.9s | 276.0s | 169.5s | 181.4s | 209.4s | 174.5s | 270.5s | 271.6s | 274.1s | 769.6s |
+| `boehmk_pfs` | 100.7s | 101.0s | 726.5s | 99.1s | 2361.0s | 196.5s | 189.0s | 863.3s | 246.2s | 233.4s | 1601.6s |
+| `cptac_pda_os` | 150.5s | 157.5s | 341.0s | 176.5s | 604.1s | 304.8s | 278.0s | 939.1s | 350.8s | 338.1s | 2286.4s |
 | `pathorob` | 20.0s | 19.6s | 67.5s | 20.9s | 43.2s | 50.7s | 43.1s | 67.0s | 67.4s | 67.5s | 191.0s |
 
-GenBio-PathFM is a slow outlier because each RGB tile is encoded as three single-channel ViT-G passes and the heads consume native 4608-d features. GenBio-PathFM baseline also runs segmentation sequentially because its three channel-wise ViT-G passes are already GPU-bound, and background PanNuke contention made the baseline much slower without changing the metric.
+GenBio-PathFM is a slow outlier because each RGB tile is encoded as three single-channel ViT-G passes and the heads consume native 4608-d features. The train-fold z-scored CoxPH survival head is also CPU-bound for very high-dimensional embeddings, especially Virchow, Midnight-12K, and GenBio-PathFM. GenBio-PathFM baseline runs segmentation sequentially because its three channel-wise ViT-G passes are already GPU-bound, and background PanNuke contention made the baseline much slower without changing the metric.
 
 ## Dataset Summary
 
@@ -75,7 +76,8 @@ GenBio-PathFM is a slow outlier because each RGB tile is encoded as three single
 | `pannuke` | segmentation | multi-organ nuclei | Fold1 | Fold2 | 2656 images | 2523 images | 309.5s | PanNuke folds | Fixed Fold1/Fold2 protocol; Fold3 not scored |
 | `ucla_lung` | slide progression classification | lung | 60 slides/fold | 30 slides/fold | full 20x/512 grid | 3 folds | 63.6s | PathoBench `ucla_lung/progression_regression` / IDR idr0082 | 3-fold balanced logistic AUROC over fold-0 train using the full tissue grid; 22-slide test fold held out |
 | `surgen` | mutation classification | colorectal | ~207 slides/fold | ~104 slides/fold | 1,167,089 cached tiles; up to 768 embedded/slide | 3 folds | 386.8s | PathoBench SR386 / SurGen, mirrored as pre-extracted HF parquet | 3-fold validation over PathoBench fold-0 train; fold-0 test sealed |
-| `cptac_pda_os` | survival | pancreatic ductal adenocarcinoma | 77-78 cases/fold | 19-20 cases/fold | 146,896 cached tiles; full grid embedded | 5 official folds | 163.9s | PathoBench CPTAC-PDA OS / TCIA PathDB | official PathoBench folds; case-level pooling; train-fold z-score + PCA(2) + fixed L2 CoxPH |
+| `boehmk_pfs` | survival | ovarian | ~97 slides/fold | ~49 slides/fold | 271,467 cached tiles; up to 768 embedded/slide | 3 folds | 101.0s | PathoBench BOEHMK PFS / Synapse, mirrored as pre-extracted HF parquet | 3-fold train-z-scored fixed-ridge CoxPH validation over fold-0 train; PathoBench test held out |
+| `cptac_pda_os` | survival | pancreatic ductal adenocarcinoma | 77-78 cases/fold | 19-20 cases/fold | 146,896 cached tiles; full grid embedded | 5 official folds | 157.5s | PathoBench CPTAC-PDA OS / TCIA PathDB | official PathoBench folds; case-level pooling; train-z-scored fixed-ridge CoxPH |
 | `pathorob` | robustness | breast lymph node + esophagus | n/a | n/a | 22,402 + 13,800 used patches | n/a | 74.5s | PathoROB HF datasets | Robustness index over camelyon/tolkach_esca; TCGA subset excluded |
 
 ## Files
@@ -87,6 +89,7 @@ Split metadata used directly by `probe.py`:
 - `mhist.json`
 - `ucla_lung.json`
 - `surgen.json`
+- `boehmk_pfs.json`
 - `cptac_pda_os.json`
 
 Datasets without JSON here are split directly by code: PCam uses fixed subset H5s, PanNuke uses Fold1/Fold2, MoNuSAC and CoNSeP use deterministic train-folder splits, and PathoROB reads its public parquet subsets directly.
@@ -102,5 +105,6 @@ Dataset-specific notes:
 - [pannuke.md](pannuke.md)
 - [ucla_lung.md](ucla_lung.md)
 - [surgen.md](surgen.md)
+- [boehmk_pfs.md](boehmk_pfs.md)
 - [cptac_pda_os.md](cptac_pda_os.md)
 - [pathorob.md](pathorob.md)
