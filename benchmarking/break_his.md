@@ -44,7 +44,7 @@ The dataset score is `mean(linear_val_f1, knn_val_f1, fewshot_val_f1)`. Macro F1
 
 ![BreaKHis null distributions](null_plots/break_his_null_distributions.png)
 
-`plot_null_checks.py` generates the figure above. The orange null is a fresh current-code rerun that constructs a new DINOv2-small with randomized weights for each seed before calling `probe.py`: mean 0.342, std 0.005, max 0.350. Fixed checkpoints are shown as vertical references: DINOv2-small 0.465, DINOv2-giant 0.627, GigaPath 0.624, GenBio-PathFM 0.717, and H-optimus-0 0.750.
+The orange null uses randomized-weight DINOv2-small evaluations through the same probe path: mean 0.342, std 0.005, max 0.350.
 
 This is a clean null check. The randomized-weight distribution is tight and far below every pretrained reference, so BreaKHis is behaving like a useful representation probe rather than a probe-head or architecture artifact.
 

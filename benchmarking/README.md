@@ -40,32 +40,15 @@ The full suite is designed to stay lightweight for the standard small Nanopath m
 - Whole-slide tasks use cached tile grids, so the final probe embeds JPEG/parquet tiles rather than opening full WSIs. PathoBench-derived slide tasks use a 20x, 512 px, 0-overlap tissue grid following the Trident/PathoBench tutorial contract. UCLA Lung and CPTAC-PDA OS embed the full cached grid; SurGen and BoehmK PFS stream deterministic up-to-768-tile raster-spaced sub-bags per slide so larger slide tasks fit the final-probe window. UCLA Lung, SurGen, and BoehmK PFS use pre-extracted parquet caches by default; CPTAC-PDA OS downloads TCIA PathDB SVS files and builds its cache locally. The remaining preprocessing simplification is a deterministic thumbnail tissue mask instead of invoking Trident's HEST segmentation model during `prepare.py`.
 - PCam is a fixed subset of the official train/valid H5 files, mirrored as small H5s with the same filenames/schema.
 - Tile classifiers use `Resize((224, 224))` from `model.py::probe_transforms` for trained Nanopath checkpoints. Frozen baseline scripts set their own `probe.transform_policy`; Virchow and GigaPath use their official timm bicubic 224 center-crop. Patch-cache probes keep square resize because their inputs are already extracted tissue tiles.
-- Segmentation runs in a background thread while classification, slide, survival, and robustness probes run in the main worker for DINOv2-style backbones. CUDA kernels still serialize, but CPU-heavy decode/head work overlaps with segmentation head training.
+- Segmentation can run in a background thread while classification, slide, survival, and robustness probes run in the main worker for DINOv2-style backbones. CUDA kernels still serialize, but CPU-heavy decode/head work can overlap with segmentation head training.
 - The same loaded frozen backbone serves every probe in one subprocess, avoiding repeated model load overhead.
 - Official held-out test splits are not read by most probes. `cptac_pda_os` is the exception: PathoBench defines the survival task by five official train/test folds, and Nanopath reports their mean c-index.
 
-Recent H100 timings from the latest untouched baseline reruns; survival rows are the June 2, 2026 train-fold z-scored fixed-ridge CoxPH reruns:
-
-| dataset | DINOv2-random | DINOv2-small | DINOv2-G | EXAONE-Path | Virchow | GigaPath | UNI-2-h | Midnight-12K | OpenMidnight | H-optimus-0 | GenBio-PathFM |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `bracs` | 157.4s | 158.8s | 168.4s | 172.1s | 183.5s | 182.0s | 166.8s | 167.8s | 169.0s | 166.5s | 151.6s |
-| `break_his` | 18.5s | 19.1s | 19.5s | 14.2s | 18.7s | 18.8s | 18.0s | 18.4s | 18.1s | 19.1s | 14.2s |
-| `mhist` | 13.1s | 12.8s | 24.4s | 16.2s | 23.8s | 19.6s | 22.4s | 24.6s | 23.4s | 25.4s | 20.8s |
-| `pcam` | 24.6s | 23.7s | 44.0s | 30.5s | 34.9s | 38.3s | 43.0s | 44.9s | 43.9s | 45.5s | 42.4s |
-| `pannuke` | 154.8s | 154.7s | 281.1s | 192.3s | 249.9s | 235.9s | 274.7s | 288.2s | 291.9s | 292.5s | 268.3s |
-| `monusac` | 24.2s | 24.0s | 120.9s | 29.1s | 57.5s | 43.4s | 118.0s | 129.0s | 131.8s | 135.2s | 32.6s |
-| `consep` | 4.2s | 4.8s | 36.9s | 4.4s | 26.1s | 13.0s | 34.3s | 32.6s | 36.0s | 35.6s | 5.4s |
-| `ucla_lung` | 26.9s | 26.7s | 63.2s | 26.1s | 46.4s | 48.4s | 44.3s | 62.8s | 64.8s | 63.3s | 139.3s |
-| `surgen` | 194.2s | 198.6s | 413.2s | 193.9s | 255.0s | 287.6s | 251.1s | 398.0s | 425.5s | 400.1s | 1131.9s |
-| `boehmk_pfs` | 100.7s | 101.0s | 726.5s | 99.1s | 2361.0s | 196.5s | 189.0s | 863.3s | 246.2s | 233.4s | 1601.6s |
-| `cptac_pda_os` | 150.5s | 157.5s | 341.0s | 176.5s | 604.1s | 304.8s | 278.0s | 939.1s | 350.8s | 338.1s | 2286.4s |
-| `pathorob` | 20.0s | 19.6s | 67.5s | 20.9s | 43.2s | 50.7s | 43.1s | 67.0s | 67.4s | 67.5s | 191.0s |
-
-GenBio-PathFM is a slow outlier because each RGB tile is encoded as three single-channel ViT-G passes and the heads consume native 4608-d features. The train-fold z-scored CoxPH survival head is also CPU-bound for very high-dimensional embeddings, especially Virchow, Midnight-12K, and GenBio-PathFM. GenBio-PathFM baseline runs segmentation sequentially because its three channel-wise ViT-G passes are already GPU-bound, and background PanNuke contention made the baseline much slower without changing the metric.
+Runtime depends on backbone size, feature dimensionality, cache warmth, and CPU decode/head-training throughput. The dataset summary below gives small-model reference times as a rough guide; high-dimensional survival heads can be CPU-bound.
 
 ## Dataset Summary
 
-| dataset | task | tissue / organ | train units | val units | train tiles/images | val tiles/images | reference H100 time | source | Nanopath adaptation |
+| dataset | task | tissue / organ | train units | val units | train tiles/images | val tiles/images | reference time | source | Nanopath adaptation |
 |---|---|---|---:|---:|---:|---:|---:|---|---|
 | `break_his` | tile classification (~700×460 microscope captures) | breast | 936 images | 196 images | 936 | 196 | 20.4s | BreaKHis 40X / EVA-Thunder | Patient-disjoint 4-subtype 40X split; linear/KNN/16-shot SimpleShot; no test scoring |
 | `bracs` | ROI classification (variable-size WSI crops) | breast | 3657 ROIs | 312 ROIs | 3657 | 312 | 179.9s | BRACS ROI FTP | Frozen-embedding linear/KNN/16-shot SimpleShot; no official test scoring |

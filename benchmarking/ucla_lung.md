@@ -28,15 +28,15 @@ Within the train pool, label 0 has 35 slides and label 1 has 55 slides. The held
 
 ## Implementation
 
-`prepare.py` downloads the pre-extracted deterministic 20x, 512 px, 0-overlap tissue grid as `tiles.parquet`. A `pathobench_20x_512_v1` marker makes older capped or differently tiled caches fail verification. `probe.py` embeds every cached tile once with a no-crop square resize, mean-pools tile embeddings per slide, then for each fold fits a balanced logistic linear probe (`sklearn.linear_model.LogisticRegression`, `class_weight="balanced"`, `max_iter=5000`) over `C ∈ {0.001, 0.01, 0.1, 0.5, 1.0, 10.0, 100.0}`, averages val AUROC across the three folds at each `C`, and reports the best mean.
+`prepare.py` downloads the pre-extracted deterministic 20x, 512 px, 0-overlap tissue grid as `tiles.parquet`. A `pathobench_20x_512_v1` marker verifies the tiling recipe. `probe.py` embeds every cached tile once with a no-crop square resize, mean-pools tile embeddings per slide, then for each fold fits a balanced logistic linear probe (`sklearn.linear_model.LogisticRegression`, `class_weight="balanced"`, `max_iter=5000`) over `C ∈ {0.001, 0.01, 0.1, 0.5, 1.0, 10.0, 100.0}`, averages val AUROC across the three folds at each `C`, and reports the best mean.
 
 ## Null Distribution Audit
 
 ![UCLA Lung null distributions](null_plots/ucla_lung_null_distributions.png)
 
-`plot_null_checks.py` generates the figure above. The orange null is a fresh current-code rerun that constructs a new DINOv2-small with randomized weights for each seed before calling `probe.py`: mean 0.692, std 0.004, max 0.700. Fixed checkpoints are shown as vertical references: DINOv2-small 0.583, DINOv2-giant 0.600, GigaPath 0.704, H-optimus-0 0.700, and GenBio-PathFM 0.768.
+The orange null uses randomized-weight DINOv2-small evaluations through the same probe path: mean 0.692, std 0.004, max 0.700.
 
-This audit is a caution flag. The randomized-weight null lands far above chance and above the natural-image DINOv2 checkpoints, so `ucla_lung` progression is not a clean representation-quality readout in isolation. It may still separate some pathology-pretrained baselines, especially GenBio-PathFM, but small improvements near the random null should be treated as unstable benchmark noise rather than strong evidence.
+This is a caution flag. The randomized-weight null lands far above chance and above natural-image DINOv2 checkpoints, so `ucla_lung` progression is not a clean representation-quality readout in isolation. Small improvements near the random null should be treated as unstable benchmark noise rather than strong evidence.
 
 ## Difference From Original Usage
 

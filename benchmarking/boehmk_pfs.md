@@ -32,12 +32,10 @@ Nanopath vendors `boehmk_pfs.json`, derived from PathoBench BOEHMK survival/PFS 
 
 ![BoehmK PFS null distributions](null_plots/boehmk_pfs_null_distributions.png)
 
-`plot_null_checks.py` generates the figure above. The orange null is a June 2, 2026 current-code rerun that constructs a new randomized-weight DINOv2-small for each seed before calling `probe.py`: mean 0.5518, std 0.0085, max 0.5683. Fixed checkpoints are shown as vertical references: DINOv2-small 0.521, DINOv2-giant 0.494, GigaPath 0.496, GenBio-PathFM 0.528, and H-optimus-0 0.503.
+The orange null uses randomized-weight DINOv2-small evaluations through the same probe path: mean 0.5518, std 0.0085, max 0.5683. An iid random risk score still centers at chance (0.5004 in a 200-draw Harrell check), and exact CoxPH on iid Gaussian 384-d features centers near chance (0.492 over 30 draws), so the high randomized-DINO null is not a c-index or CoxPH-analysis offset.
+
+This makes BoehmK PFS a cautionary survival benchmark. DINOv2 never sees `case_id`, but nuisance controls show that the folds expose non-pathology shortcuts: numeric `case_id` alone scores 0.558 on Nanopath's 3-fold split and 0.562 over the five official PathoBench folds; JPEG byte-length stats score 0.526; 128-tile thumbnail summaries score 0.538 from RGB mean, 0.575 from contrast, and 0.598 from a darkness/tissue proxy. These controls suggest randomized DINOv2 is acting as a low-level stain/scanner/tissue-density feature extractor, not discovering survival biology. Treat raw BoehmK c-index as shortcut-sensitive unless folds or scoring make these nuisance baselines return to ~0.50.
 
 ## Difference From Original Usage
 
 PathoBench's BOEHMK survival task reports Harrell's c-index. PathoBench is designed for standardized task evaluation across folds and pools Trident patch embeddings. Nanopath keeps the same 20x/512 patch-grid cache, uses a deterministic up-to-768-tile sub-bag for final-probe runtime, and uses repeated train-derived internal validation for fast iteration without scoring the PathoBench test fold. The survival head is intentionally simple and fixed: train-fold z-scored pooled features into CoxPH alpha 2.0. The ridge penalty preserves all embedding dimensions and avoids turning the probe into a sparse feature-selection benchmark, while standardization keeps the penalty scale-comparable. The tissue mask is a lightweight deterministic thumbnail mask rather than Trident HEST segmentation.
-
-## Runtime
-
-On June 2, 2026 H100 survival-only probes, the deterministic 768-tile sub-bag embedded 85,803 tiles and took 100.7s for DINOv2-S random, 101.0s for DINOv2-S, 726.5s for DINOv2-G, 246.2s for OpenMidnight, 233.4s for H-optimus-0, 95.8s for the current Nanopath main model, and 1601.6s for GenBio-PathFM. High-dimensional fixed-ridge CoxPH fits, especially Virchow and GenBio-PathFM, are CPU-bound after embedding.

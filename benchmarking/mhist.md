@@ -44,7 +44,7 @@ The dataset score is `mean(linear_val_f1, knn_val_f1, fewshot_val_f1)`. Macro F1
 
 ![MHIST null distributions](null_plots/mhist_null_distributions.png)
 
-`plot_null_checks.py` generates the figure above. The orange null is a fresh current-code rerun that constructs a new DINOv2-small with randomized weights for each seed before calling `probe.py`: mean 0.577, std 0.008, max 0.594. Fixed checkpoints are shown as vertical references: DINOv2-small 0.772, DINOv2-giant 0.800, GigaPath 0.779, GenBio-PathFM 0.794, and H-optimus-0 0.793.
+The orange null uses randomized-weight DINOv2-small evaluations through the same probe path: mean 0.577, std 0.008, max 0.594.
 
 This is a strong null check. The randomized-weight architecture can extract some low-level MHIST signal, but all pretrained references sit far above the null tail, so the probe remains a useful representation-quality readout.
 

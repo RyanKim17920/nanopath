@@ -36,10 +36,10 @@ The dataset score is `mean(linear_val_f1, knn_val_f1, fewshot_val_f1)`. The offi
 
 ![PCam null distributions](null_plots/pcam_null_distributions.png)
 
-`plot_null_checks.py` generates the figure above. The orange null is a fresh current-code rerun that constructs a new DINOv2-small with randomized weights for each seed before calling `probe.py`: mean 0.730, std 0.008, max 0.743. Fixed checkpoints are shown as vertical references: DINOv2-small 0.794, DINOv2-giant 0.775, GigaPath 0.918, GenBio-PathFM 0.912, and H-optimus-0 0.908.
+The orange null uses randomized-weight DINOv2-small evaluations through the same probe path: mean 0.730, std 0.008, max 0.743.
 
 This audit shows a high random-feature floor, likely because PCam's small fixed subset has strong low-level stain and morphology cues. The probe is still usable because pretrained DINOv2 clears the null and pathology-pretrained references are far above it, but small changes near the randomized-weight tail should be treated cautiously.
 
 ## Difference From Original Usage
 
-THUNDER lists the full official train/valid/test sets for PCam. Nanopath deliberately uses a small deterministic train/valid subset from those official H5 files so the full probe remains inside the final H100 window. This is a runtime adaptation, not an exact full-sample THUNDER PCam run. Because the random-feature null is high, PCam is best interpreted as a sanity-check metastasis morphology probe where large pathology-pretrained gains matter, not as a sensitive detector of tiny backbone changes.
+THUNDER lists the full official train/valid/test sets for PCam. Nanopath deliberately uses a small deterministic train/valid subset from those official H5 files so the full probe remains inside the runtime budget. This is a runtime adaptation, not an exact full-sample THUNDER PCam run. Because the random-feature null is high, PCam is best interpreted as a sanity-check metastasis morphology probe where large pathology-pretrained gains matter, not as a sensitive detector of tiny backbone changes.

@@ -32,10 +32,10 @@ The archive may include `Test`, but `probe.py` does not read it.
 
 ![CoNSeP null distributions](null_plots/consep_null_distributions.png)
 
-`plot_null_checks.py` generates the figure above. The orange null is a fresh current-code rerun that constructs a new DINOv2-small with randomized weights for each seed before calling `probe.py`: mean 0.228, std 0.000, max 0.228. Fixed checkpoints are shown as vertical references: DINOv2-small 0.202, DINOv2-giant 0.217, GigaPath 0.237, GenBio-PathFM 0.231, and H-optimus-0 0.222.
+The orange null uses randomized-weight DINOv2-small evaluations through the same probe path: mean 0.228, std 0.000, max 0.228.
 
-This audit is a caution flag. The randomized-weight distribution is degenerate and sits above several pretrained references, which means CoNSeP's current score is strongly influenced by the segmentation head, class priors, or fold construction rather than clean backbone signal. GigaPath and GenBio-PathFM clear the null, but small changes near 0.228 should not be treated as meaningful representation gains.
+This is a caution flag. The randomized-weight distribution is degenerate, which means CoNSeP's score is strongly influenced by the segmentation head, class priors, or fold construction rather than clean backbone signal. Small changes near 0.228 should not be treated as meaningful representation gains.
 
 ## Difference From Original Usage
 
-CoNSeP is often used with its official Train/Test split. Nanopath uses only repeated folds of Train, preserving Test for non-iterative evaluation outside `mean_probe_score`. The MaskTransformer head and per-image macro Jaccard come from THUNDER; CoNSeP is not in THUNDER's standard suite, so this is the THUNDER seg-head applied to a non-THUNDER dataset. The current null audit is a real caution flag: this probe is small enough that the decoder and class priors can dominate, so only changes that move the full benchmark mean, or that also improve PanNuke/MoNuSAC, should be considered meaningful.
+CoNSeP is often used with its official Train/Test split. Nanopath uses only repeated folds of Train, preserving Test for non-iterative evaluation outside `mean_probe_score`. The MaskTransformer head and per-image macro Jaccard come from THUNDER; CoNSeP is not in THUNDER's standard suite, so this is the THUNDER seg-head applied to a non-THUNDER dataset. This probe is small enough that the decoder and class priors can dominate, so only changes that move the full benchmark mean, or that also improve PanNuke/MoNuSAC, should be considered meaningful.

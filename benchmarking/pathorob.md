@@ -36,7 +36,7 @@ The implementation counts same-biology/different-center neighbors (`SO`) and dif
 
 ![PathoROB null distributions](null_plots/pathorob_null_distributions.png)
 
-`plot_null_checks.py` generates the figure above. The orange null is a fresh current-code rerun that constructs a new DINOv2-small with randomized weights for each seed before calling `probe.py`: mean 0.194, std 0.003, max 0.199. Fixed checkpoints are shown as vertical references: DINOv2-small 0.754, DINOv2-giant 0.798, GigaPath 0.745, GenBio-PathFM 0.941, and H-optimus-0 0.893.
+The orange null uses randomized-weight DINOv2-small evaluations through the same probe path: mean 0.194, std 0.003, max 0.199.
 
 This is the strongest null check in the suite. Randomized DINOv2-small is tightly clustered near 0.19, while every pretrained reference is far above it, so PathoROB is clearly measuring backbone structure rather than probe-head randomness.
 

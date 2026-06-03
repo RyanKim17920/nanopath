@@ -36,12 +36,12 @@ Only train and val are read by `probe.py`.
 
 ![SurGen null distributions](null_plots/surgen_null_distributions.png)
 
-`plot_null_checks.py` generates the figure above. The orange null is a fresh current-code rerun that constructs a new DINOv2-small with randomized weights for each seed before calling `probe.py`: mean 0.570, std 0.006, max 0.579. Fixed checkpoints are shown as vertical references: DINOv2-small 0.623, DINOv2-giant 0.617, GigaPath 0.626, GenBio-PathFM 0.637, and H-optimus-0 0.658.
+The orange null uses randomized-weight DINOv2-small evaluations through the same probe path: mean 0.570, std 0.006, max 0.579.
 
-This audit is acceptable but not low-floor. Randomized weights recover a real amount of signal, so SurGen should not be interpreted as chance-calibrated around 0.5. The fixed pretrained references still clear the randomized null by a meaningful margin, with H-optimus-0 separating best, but small AUROC changes near the null tail should be treated cautiously.
+This audit is acceptable but not low-floor. Randomized weights recover a real amount of signal, so SurGen should not be interpreted as chance-calibrated around 0.5. Small AUROC changes near the randomized null should be treated cautiously.
 
 ## Difference From Original Usage
 
-This is PathoBench-derived but not a full PathoBench test-fold evaluation. PathoBench standardizes the SR386 RAS mutation labels, train/test split, sample column, and AUROC metric, and its tutorial runs linear probing on mean-pooled Trident features extracted from a 20x, 512 px, 0-overlap tissue grid with no bag-size cap. Nanopath follows that tiling shape in `prepare.py`, but `probe.py` uses a deterministic 768-tile sub-bag so the final probe fits the small-model H100 window. PathoBench's canonical fold-0 test split is deliberately not scored in `mean_probe_score`, Nanopath uses repeated validation carved out of PathoBench fold-0 train for fast iteration, and the tissue mask is a lightweight deterministic thumbnail mask rather than Trident HEST segmentation.
+This is PathoBench-derived but not a full PathoBench test-fold evaluation. PathoBench standardizes the SR386 RAS mutation labels, train/test split, sample column, and AUROC metric, and its tutorial runs linear probing on mean-pooled Trident features extracted from a 20x, 512 px, 0-overlap tissue grid with no bag-size cap. Nanopath follows that tiling shape in `prepare.py`, but `probe.py` uses a deterministic 768-tile sub-bag so the final probe fits the runtime budget. PathoBench's canonical fold-0 test split is deliberately not scored in `mean_probe_score`, Nanopath uses repeated validation carved out of PathoBench fold-0 train for fast iteration, and the tissue mask is a lightweight deterministic thumbnail mask rather than Trident HEST segmentation.
 
 The HF cache is not a new data source or a changed protocol; it is the output of the official-source extraction above. It exists because downloading and tiling hundreds of multi-GB CZI files from EBI takes multiple hours and is a poor default setup experience.
