@@ -44,29 +44,31 @@ A successful model training prints periodic train lines, appends metrics to `met
   <img src="https://api.labless.dev/api/nano-projects/nanopath/plot.svg" alt="Nanopath progress plot" width="1290">
 </a>
 
-Score is final `mean_probe_score`, the average of linear, knn, 16-shot, segmentation, progression, mutation, survival, and robustness. These columns summarize a 12-dataset suite derived from [THUNDER](https://mics-lab.github.io/thunder/) and [PathoBench](https://github.com/mahmoodlab/patho-bench), with modifications to keep single-GPU evaluation lightweight. See [benchmarking/README.md](benchmarking/README.md) for more information.
+Score is final `mean_probe_score`, the average of linear, knn, 16-shot, segmentation, progression, mutation, survival, and robustness. These columns summarize a 12-dataset suite derived from [THUNDER](https://mics-lab.github.io/thunder/), [PathoBench](https://github.com/mahmoodlab/patho-bench), and LEOPARD, with modifications to keep single-GPU evaluation lightweight. See [benchmarking/README.md](benchmarking/README.md) for more information.
+
+The survival suite now uses LEOPARD BCR plus CPTAC-PDA OS. LEOPARD is the easier survival benchmark: frozen pathology and DINOv2 baselines show clear recurrence-prediction signal. CPTAC is intentionally much harder; under the current split, the baselines show little reliable survival signal beyond the high randomized-DINOv2 null and nuisance controls. We are keeping CPTAC anyway because a hard survival probe is useful for seeing whether new training recipes can hillclimb on a clinically relevant endpoint. Averaging LEOPARD and CPTAC gives the single survival column a sensible balance between an easier signal-bearing task and a harder stress-test task.
 
 ### Nanopath models
 
 | # | Description | final score | linear | knn | 16-shot | segmentation | progression | mutation | survival | robustness | Contributors |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| 1 | DINOv2-small/14-reg trained on TCGA w KDE| 0.6164 | 0.7550 | 0.6839 | 0.5890 | 0.3161 | 0.6418 | 0.5994 | 0.4929 | 0.8531 | @PaulScotti |
+| 1 | DINOv2-small/14-reg trained on TCGA w KDE | 0.6277 | 0.7555 | 0.6839 | 0.5890 | 0.3089 | 0.6418 | 0.5994 | 0.5898 | 0.8531 | @PaulScotti |
 
 ### Baselines
 
 | # | Name | Description | final score | linear | knn | 16-shot | segmentation | progression | mutation | survival | robustness |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | GenBio-PathFM | GenBio-PathFM ViT-G/16 | **0.6818** | 0.8076 | 0.7626 | 0.6970 | 0.3252 | 0.7680 | 0.6375 | 0.5156 | 0.9412 |
-| 2 | H-optimus-0 | H-optimus-0 ViT-G/14-reg | 0.6703 | 0.7995 | 0.7676 | 0.6931 | 0.3244 | 0.7004 | 0.6584 | 0.5266 | 0.8926 |
-| 3 | UNI-2-h | MahmoodLab UNI-2-h ViT-H/14 | 0.6680 | 0.7910 | 0.7547 | 0.6961 | 0.3233 | 0.7330 | 0.6463 | 0.5362 | 0.8637 |
-| 4 | EXAONE-Path-2.5 | LG AI Research EXAONE-Path-2.5 ViT-B/14 | 0.6537 | 0.8028 | 0.7582 | 0.6872 | 0.2820 | 0.6859 | 0.6494 | 0.5229 | 0.8409 |
-| 5 | Virchow | Paige/Microsoft Virchow ViT-H/14 | 0.6444 | 0.7915 | 0.7220 | 0.6114 | 0.3156 | 0.6689 | 0.6350 | 0.5112 | 0.8994 |
-| 6 | GigaPath | Prov-GigaPath tile encoder ViT-G/16 | 0.6369 | 0.7977 | 0.7149 | 0.6537 | 0.3212 | 0.7041 | 0.6262 | 0.5322 | 0.7448 |
-| 7 | Midnight-12K | Kaiko Midnight-12K ViT-G/14 | 0.6130 | 0.7684 | 0.6807 | 0.5758 | 0.2664 | 0.6840 | 0.6087 | 0.5375 | 0.7823 |
-| 8 | DINOv2-giant | Untouched Meta `dinov2_vitg14_reg` | 0.6079 | 0.7689 | 0.7208 | 0.5834 | 0.2844 | 0.6000 | 0.6174 | 0.4896 | 0.7985 |
-| 9 | OpenMidnight | OpenMidnight ViT-G/14-reg | 0.6024 | 0.7926 | 0.7135 | 0.4335 | 0.3099 | 0.6993 | 0.6091 | 0.5175 | 0.7438 |
-| 10 | DINOv2-small | Untouched Meta `dinov2_vits14_reg` | 0.5819 | 0.6968 | 0.6249 | 0.5834 | 0.2663 | 0.5827 | 0.6225 | 0.5244 | 0.7543 |
-| 11 | DINOv2-small random | Randomized weights `dinov2_vits14_reg` | 0.4629 | 0.5282 | 0.5066 | 0.4139 | 0.2673 | 0.6922 | 0.5648 | 0.5399 | 0.1905 |
+| 1 | GenBio-PathFM | GenBio-PathFM ViT-G/16 | **0.6917** | 0.8076 | 0.7626 | 0.6970 | 0.3234 | 0.7680 | 0.6375 | 0.5964 | 0.9412 |
+| 2 | UNI-2-h | MahmoodLab UNI-2-h ViT-H/14 | 0.6782 | 0.7910 | 0.7547 | 0.6961 | 0.3270 | 0.7330 | 0.6463 | 0.6137 | 0.8637 |
+| 3 | H-optimus-0 | H-optimus-0 ViT-G/14-reg | 0.6763 | 0.7995 | 0.7676 | 0.6931 | 0.3241 | 0.7004 | 0.6584 | 0.5748 | 0.8926 |
+| 4 | EXAONE-Path-2.5 | LG AI Research EXAONE-Path-2.5 ViT-B/14 | 0.6606 | 0.8028 | 0.7582 | 0.6872 | 0.2820 | 0.6859 | 0.6494 | 0.5781 | 0.8409 |
+| 5 | Virchow | Paige/Microsoft Virchow ViT-H/14 | 0.6591 | 0.7915 | 0.7220 | 0.6114 | 0.3206 | 0.6689 | 0.6350 | 0.6239 | 0.8994 |
+| 6 | GigaPath | Prov-GigaPath tile encoder ViT-G/16 | 0.6456 | 0.7977 | 0.7149 | 0.6537 | 0.3304 | 0.7041 | 0.6262 | 0.5932 | 0.7448 |
+| 7 | Midnight-12K | Kaiko Midnight-12K ViT-G/14 | 0.6204 | 0.7684 | 0.6807 | 0.5758 | 0.2722 | 0.6840 | 0.6087 | 0.5907 | 0.7823 |
+| 8 | DINOv2-giant | Untouched Meta `dinov2_vitg14_reg` | 0.6196 | 0.7689 | 0.7208 | 0.5834 | 0.2826 | 0.6000 | 0.6174 | 0.5849 | 0.7985 |
+| 9 | OpenMidnight | OpenMidnight ViT-G/14-reg | 0.6114 | 0.7926 | 0.7135 | 0.4335 | 0.3087 | 0.6993 | 0.6091 | 0.5907 | 0.7438 |
+| 10 | DINOv2-small | Untouched Meta `dinov2_vits14_reg` | 0.5841 | 0.6968 | 0.6249 | 0.5834 | 0.2704 | 0.5827 | 0.6225 | 0.5374 | 0.7543 |
+| 11 | DINOv2-small random | Randomized weights `dinov2_vits14_reg` | 0.4703 | 0.5255 | 0.5066 | 0.4139 | 0.2701 | 0.6922 | 0.5648 | 0.5984 | 0.1905 |
 
 Baseline rows are frozen reference checkpoints evaluated with the same probe suite. They help calibrate the plot, but pathology-specific baselines are not valid initialization points for nanopath leaderboard submissions. The reference scripts live in `baselines/`; run Virchow and GigaPath separately with `baselines/virchow_baseline.py` and `baselines/gigapath_baseline.py`.
 
@@ -170,12 +172,12 @@ On the MedARC cluster, the checked-in `/data` and `/block` paths are the intende
 
 **What `download=True` does**
 1. **TCGA tiles**: `huggingface_hub.snapshot_download` (filtered to `shard-*.parquet`) pulls the 200 parquet shards (~120 GB total, `{path: string, jpeg: binary}` rows with 64-row row groups) from [`medarc/nanopath`](https://huggingface.co/datasets/medarc/nanopath) into `data.dataset_dir`.
-2. **Probe datasets**: for each empty configured root, fetches/unpacks and, where needed, pre-extracts the probe data. BRACS, BreaKHis, PCam, PanNuke, UCLA Lung, MHIST, CoNSeP, SurGen, and BoehmK PFS use the [`medarc/nanopath`](https://huggingface.co/datasets/medarc/nanopath) probe mirror for portable noninteractive setup; CPTAC-PDA OS downloads the official TCIA PathDB SVS files and builds its cache locally; PathoROB and MoNuSAC come from their official public sources. Before fetching BoehmK PFS, MHIST, or CoNSeP, `prepare.py` prints that users must satisfy the official upstream form/access terms first. Slide-level probes cache 20x/512 tissue grids (`tiles.parquet`, `surgen-*.parquet`, or `patches.parquet`) so `probe.py` never opens raw WSIs during training/probing; SurGen and BoehmK PFS stream deterministic raster-spaced sub-bags for runtime, while CPTAC-PDA OS embeds its full cached grid.
+2. **Probe datasets**: for each empty configured root, fetches/unpacks and, where needed, pre-extracts the probe data from the [`medarc/nanopath`](https://huggingface.co/datasets/medarc/nanopath/tree/main/probes) probe mirror for portable noninteractive setup. Before fetching LEOPARD BCR, MHIST, or CoNSeP, `prepare.py` prints the relevant upstream provenance/access notice. Slide-level probes cache 20x/512 tissue grids (`tiles.parquet`, `surgen-*.parquet`, or `patches.parquet`) so `probe.py` never opens raw WSIs during training/probing; SurGen and LEOPARD BCR stream deterministic raster-spaced sub-bags for runtime, while CPTAC-PDA OS embeds its full cached grid.
 3. **DINOv2 backbone weights**: `torch.hub.load_state_dict_from_url` fetches the Meta checkpoint for `model.type` from `dl.fbaipublicfiles.com` into `~/.cache/torch/hub/checkpoints/`.
 
 **Prerequisites**
 - ~120 GB free wherever `data.dataset_dir` lives for the parquet shards (cluster default: `/data/nanopath_parquet`).
-- Probe data disk varies by suite. Expect that it might take a few hours for one-time downloading and preprocessing of all probe datasets.
+- Probe data disk varies by suite. Expect that it might take a few hours for one-time downloading all mirrored probe datasets.
 
 ### Regenerating the tile dataset from raw SVS
 
@@ -228,7 +230,7 @@ The `/data`- and `/block`-rooted defaults below are the MedARC cluster layout; `
 - run outputs: `project.output_dir` (cluster default `/data/$USER/nanopath/main/...`; auto-localized default `nanopath/data/main/...`). Final probe results log to `metrics.jsonl`.
 - wandb: `project.wandb_dir` (cluster default `/data/$USER/nanopath/wandb`; auto-localized default `nanopath/data/wandb`).
 - parquet tile shards: `data.dataset_dir` (defaults to `/data/nanopath_parquet`).
-- probe datasets: `probe.dataset_roots` (defaults to shared `/block/...` and `/data/...` paths on the MedARC cluster).
+- probe datasets: `probe.dataset_roots` (defaults to shared `/block/...` and `/data/...` paths on the MedARC cluster; LEOPARD BCR defaults to `/data/leopard_bcr` with hpcroot group sharing).
 - DINOv2 backbone weights: `~/.cache/torch/hub/checkpoints/` for the selected `model.type`.
 - SLURM logs: `slurm/<jobid>.{out,err}` in the repo.
 - labless source snapshot: `project.output_dir/labless_source`.
@@ -241,4 +243,4 @@ See the live [labless nanopath log](https://labless.dev/nano-projects/nanopath) 
 
 ## Acknowledgements
 
-Inspired by [nanochat](https://github.com/karpathy/nanochat). The DINOv2 backbone weights are [Meta checkpoints](https://github.com/facebookresearch/dinov2) loaded by state-dict into our own clean ViT implementation. Tile-classification and segmentation probes follow the [THUNDER benchmark](https://mics-lab.github.io/thunder/); slide-level probes follow [PathoBench](https://huggingface.co/datasets/MahmoodLab/Patho-Bench).
+Inspired by [nanochat](https://github.com/karpathy/nanochat). The DINOv2 backbone weights are [Meta checkpoints](https://github.com/facebookresearch/dinov2) loaded by state-dict into our own clean ViT implementation. Tile-classification and segmentation probes follow the [THUNDER benchmark](https://mics-lab.github.io/thunder/); slide-level probes follow [PathoBench](https://huggingface.co/datasets/MahmoodLab/Patho-Bench) and LEOPARD.
