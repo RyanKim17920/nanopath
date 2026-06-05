@@ -30,7 +30,7 @@ RUN_DIR=$PWD/data/main/my-run
 
 The labless backend stores the submission as a run with saved source context and
 an optional W&B run link. It derives the public contributor from the verified
-GitHub login, rejects scoped OAuth tokens, and accepts at most 20 submissions per
+GitHub login, rejects scoped OAuth tokens, and accepts at most 100 submissions per
 login per 24 hours. The website fetches the API data and the SVG plot from
 `api.labless.dev`, so the run appears in the project log, run table, and plot
 without opening a pull request.
@@ -136,6 +136,7 @@ are rejected.
 The current checkout can change after training; labless uses the source snapshot
 from the run, not the present working tree, when building the review diff. W&B
 may be online or offline because source review never depends on the W&B API.
+`AGENTS.md` and `CLAUDE.md` are ignored when source changes are packaged.
 
 ## What becomes public
 

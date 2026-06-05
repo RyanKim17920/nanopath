@@ -34,6 +34,7 @@ FULL_RUN_MAX_SAMPLES = 1_000_000
 MAX_REPO_DIFF_BYTES = 120_000
 MAX_REVIEW_FILES_BYTES = 120_000
 REVIEW_DIFF_PATHS = ("train.py", "model.py", "dataloader.py", "prepare.py")
+IGNORED_SOURCE_PATHS = {"AGENTS.md", "CLAUDE.md"}
 NANOPATH_LOCKED_PROBE_CONFIG = {
     "enabled": True,
     "model_weights": "ema",
@@ -470,7 +471,7 @@ def changed_source_paths(commit: str, source_dir: Path) -> list[str]:
     for p in source_dir.rglob("*"):
         rel_path = p.relative_to(source_dir)
         rel = rel_path.as_posix()
-        if p.is_file() and p.name != "manifest.json" and not rel.startswith("labless/") and not any(part.startswith(".") for part in rel_path.parts):
+        if p.is_file() and p.name != "manifest.json" and rel not in IGNORED_SOURCE_PATHS and not rel.startswith("labless/") and not any(part.startswith(".") for part in rel_path.parts):
             source_files.append(rel)
     main_files = [
         path for path in subprocess.check_output(["git", "ls-tree", "-r", "--name-only", commit, "--", *REVIEW_DIFF_PATHS, *LOCKED_PATHS], text=True).splitlines()
@@ -553,6 +554,8 @@ def main_file(commit: str, path: str) -> bytes | None:
 
 
 def snapshot_file(source_dir: Path, path: str) -> bytes | None:
+    if path in IGNORED_SOURCE_PATHS:
+        return None
     source_path = source_dir / path
     return source_path.read_bytes() if source_path.exists() and source_path.is_file() else None
 
@@ -591,7 +594,7 @@ def locked_path_changes(commit: str, source_dir: Path) -> list[str]:
     for p in source_dir.rglob("*"):
         rel_path = p.relative_to(source_dir)
         rel = rel_path.as_posix()
-        if p.is_file() and p.name != "manifest.json" and not rel.startswith("labless/") and not any(part.startswith(".") for part in rel_path.parts):
+        if p.is_file() and p.name != "manifest.json" and rel not in IGNORED_SOURCE_PATHS and not rel.startswith("labless/") and not any(part.startswith(".") for part in rel_path.parts):
             source_files.append(rel)
     main_files = [
         path for path in subprocess.check_output(["git", "ls-tree", "-r", "--name-only", commit, "--", *LOCKED_PATHS], text=True).splitlines()
