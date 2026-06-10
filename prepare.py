@@ -3,9 +3,8 @@
 #   - data.dataset_dir/shard-NNNNN.parquet   (the 4M-tile dataset, sharded)
 #   - probe.dataset_roots[name] for each configured probe dataset
 #   - Meta's DINOv2 pretrained weights for cfg["model"]["type"] (torch.hub cache)
-# Defaults to HF for the tile dataset and mirrored probe assets, official
-# sources for the few probes not mirrored yet, and dl.fbaipublicfiles.com for
-# DINOv2 weights.
+# Defaults to HF for the tile dataset and probe assets. Official-source helper
+# functions are maintainer rebuild paths for creating the HF probe mirrors.
 # download_TCGA.sh and prepare_tiles / pack_from_jpeg_dir are only relevant if
 # you want to regenerate the tile dataset from raw SVS files; see README.
 #
@@ -46,7 +45,6 @@ REPO_ROOT = Path(__file__).resolve().parent
 HF_REPO_ID = "medarc/nanopath"
 HF_PROBE_PREFIX = "probes"
 PROBE_ACCESS_NOTICES = {
-    "boehmk_pfs": "you MUST satisfy the BOEHMK Synapse access terms at https://www.synapse.org/Synapse:syn25946117/wiki/611576 before using these data; this mirror download is only for portable setup.",
     "consep": "you MUST satisfy the official CoNSeP/Warwick access terms at https://warwick.ac.uk/fac/sci/dcs/research/tia/data/hovernet/ before using these data; this mirror download is only for portable setup.",
     "mhist": "you MUST complete MHIST's Dataset Research Use Agreement at https://bmirds.github.io/MHIST/ before using these data; this mirror download is only for portable setup.",
 }
@@ -329,6 +327,14 @@ def hf_probe_dir(name, root):
     shutil.rmtree(root / HF_PROBE_PREFIX)
 
 
+def make_hpcroot_writable(root):
+    import grp
+    gid = grp.getgrnam("hpcroot").gr_gid
+    for p in [root, *root.rglob("*")]:
+        os.chown(p, -1, gid)
+        p.chmod(p.stat().st_mode | 0o660 | (0o110 if p.is_dir() else 0))
+
+
 def fetch_pannuke(root):
     for fold in (1, 2):
         if all((root / f"Fold{fold}/{kind}/fold{fold}/{kind}.npy").exists() for kind in ("images", "masks")):
@@ -363,7 +369,7 @@ def fetch_break_his(root):
 PATHOBENCH_TILING_VERSION = "pathobench_20x_512_v1"
 PATHOBENCH_TARGET_MPP = 0.5
 PATHOBENCH_PATCH_PX = 512
-CPTAC_PDA_OS_TILING_VERSION = PATHOBENCH_TILING_VERSION + "_full"
+CPTAC_PDA_OS_TILING_VERSION = PATHOBENCH_TILING_VERSION + "_cptac_pda_os_fold0_train_v1"
 CPTAC_PDA_OS_RAW_BASE = "https://pathdb.cancerimagingarchive.net/system/files/wsi/ross/CPTAC/PDA"
 
 
@@ -378,13 +384,13 @@ def _openslide_mpp(slide, default=PATHOBENCH_TARGET_MPP):
     return default
 
 
-def _openslide_grid_rows(slide, slide_id, image_col="jpeg", default_mpp=PATHOBENCH_TARGET_MPP):
+def _openslide_grid_rows(slide, slide_id, image_col="jpeg", default_mpp=PATHOBENCH_TARGET_MPP, cap=0):
     import io
     w, h = slide.dimensions
     src = round(PATHOBENCH_PATCH_PX * PATHOBENCH_TARGET_MPP / _openslide_mpp(slide, default_mpp))
     thumb = np.asarray(slide.get_thumbnail((512, 512)).convert("RGB")).mean(axis=2) if slide.level_count > 1 else None
     sx, sy = (w / thumb.shape[1], h / thumb.shape[0]) if thumb is not None else (None, None)
-    rows = []
+    coords = []
     for y in range(0, max(1, h - src + 1), src):
         for x in range(0, max(1, w - src + 1), src):
             if thumb is not None:
@@ -393,10 +399,15 @@ def _openslide_grid_rows(slide, slide_id, image_col="jpeg", default_mpp=PATHOBEN
                     continue
             elif np.asarray(slide.read_region((max(0, x + src // 2 - 16), max(0, y + src // 2 - 16)), 0, (32, 32)).convert("RGB")).mean() >= 230:
                 continue
-            tile = slide.read_region((x, y), 0, (src, src)).convert("RGB").resize((PATHOBENCH_PATCH_PX, PATHOBENCH_PATCH_PX), Image.BILINEAR)
-            buf = io.BytesIO()
-            tile.save(buf, "JPEG", quality=JPEG_QUALITY)
-            rows.append({"slide_id": slide_id, image_col: buf.getvalue()})
+            coords.append((x, y))
+    if cap and len(coords) > cap:
+        coords = [coords[int(i)] for i in np.linspace(0, len(coords) - 1, cap, dtype=np.int64)]
+    rows = []
+    for x, y in coords:
+        tile = slide.read_region((x, y), 0, (src, src)).convert("RGB").resize((PATHOBENCH_PATCH_PX, PATHOBENCH_PATCH_PX), Image.BILINEAR)
+        buf = io.BytesIO()
+        tile.save(buf, "JPEG", quality=JPEG_QUALITY)
+        rows.append({"slide_id": slide_id, image_col: buf.getvalue()})
     return rows
 
 
@@ -538,73 +549,78 @@ def fetch_surgen_from_official_sources(root):
     building.unlink(missing_ok=True)
 
 
-# BOEHMK PFS survival probe. Default setup pulls the mirrored tile cache; the
-# Synapse helper rebuilds it after a user has accepted the upstream access terms.
-BOEHMK_PFS_HF_TSV = "boehmk_/PFS/k=all.tsv"
-BOEHMK_PFS_SYNAPSE_TAR = "syn31937603"
-BOEHMK_PFS_TILING_VERSION = PATHOBENCH_TILING_VERSION
+# LEOPARD biochemical-recurrence survival probe. The checked-in JSON keeps all
+# recurrence events plus the longest-follow-up censored controls; source prep
+# streams official S3 slides one at a time into a compact capped tile cache.
+LEOPARD_BCR_TILING_VERSION = PATHOBENCH_TILING_VERSION + "_leopard_bcr_174x768_v1"
+LEOPARD_BCR_TILES_PER_SLIDE = 768
 
 
-def synapse_download(syn_id, dst):
-    req = urllib.request.Request(
-        f"https://repo-prod.prod.sagebase.org/repo/v1/entity/{syn_id}/file",
-        headers={"Authorization": f"Bearer {os.environ['SYNAPSE_AUTH_TOKEN']}", "User-Agent": "nanopath"},
-    )
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    with urllib.request.urlopen(req, timeout=120) as r, dst.open("wb") as f:
-        shutil.copyfileobj(r, f, length=1 << 20)
-
-
-def _tile_one_boehmk_pfs(args):
+def _leopard_bcr_extract_one(args):
     import openslide
-    wsi_path, slide_id, cache_dir = args
+    case_id, slide_id, event, days, raw_dir, cache_dir = args
     cache_path = Path(cache_dir) / f"{slide_id}.parquet"
+    tif_path = Path(raw_dir) / f"{slide_id}.tif"
     if cache_path.exists():
+        tif_path.unlink(missing_ok=True)
         return slide_id, pq.read_metadata(cache_path).num_rows
-    slide = openslide.OpenSlide(str(wsi_path))
-    rows = _openslide_grid_rows(slide, slide_id, image_col="image")
+    url = f"https://leopard-challenge.s3.us-west-2.amazonaws.com/training/{slide_id}.tif"
+    expected = http_size(url)
+    if tif_path.exists() and tif_path.stat().st_size != expected:
+        tif_path.unlink()
+    http_download(url, tif_path)
+    assert tif_path.stat().st_size == expected, f"bad LEOPARD TIFF: {tif_path}"
+    slide = openslide.OpenSlide(str(tif_path))
+    rows = _openslide_grid_rows(slide, slide_id, image_col="image", cap=LEOPARD_BCR_TILES_PER_SLIDE)
     slide.close()
+    for i, row in enumerate(rows):
+        row["case_id"], row["tile_idx"] = case_id, i
     tmp = cache_path.with_suffix(".parquet.part")
-    pq.write_table(pa.table({"slide_id": [r["slide_id"] for r in rows], "image": [r["image"] for r in rows]}), tmp, compression="snappy", row_group_size=PARQUET_ROW_GROUP_SIZE)
+    pq.write_table(pa.table({k: [r[k] for r in rows] for k in ("case_id", "slide_id", "tile_idx", "image")}), tmp, compression="snappy", row_group_size=PARQUET_ROW_GROUP_SIZE)
     os.replace(tmp, cache_path)
+    tif_path.unlink()
     return slide_id, len(rows)
 
 
-def fetch_boehmk_pfs(root):
-    hf_probe_dir("boehmk_pfs", root)
+def fetch_leopard_bcr(root):
+    hf_probe_dir("leopard_bcr", root)
+    if root == Path("/data/leopard_bcr"):
+        make_hpcroot_writable(root)
 
 
-def fetch_boehmk_pfs_from_synapse(root):
-    from huggingface_hub import hf_hub_download
-    root.mkdir(parents=True, exist_ok=True)
-    shutil.copy(hf_hub_download(repo_id="MahmoodLab/Patho-Bench", repo_type="dataset", filename=BOEHMK_PFS_HF_TSV), root / "labels.tsv")
-    splits = json.loads((REPO_ROOT / "benchmarking" / "boehmk_pfs.json").read_text())
-    slide_ids = sorted(set(splits["train"]["slide_ids"] + splits["val"]["slide_ids"]))
-    wsi_dir, slide_cache = root / "wsi", root / "slides"
-    wsi_dir.mkdir(parents=True, exist_ok=True)
+def fetch_leopard_bcr_from_official_sources(root):
+    splits = json.loads((REPO_ROOT / "benchmarking" / "leopard_bcr.json").read_text())
+    raw_dir, slide_cache = root / "raw", root / "slides"
+    raw_dir.mkdir(parents=True, exist_ok=True)
     slide_cache.mkdir(parents=True, exist_ok=True)
-    version, building = root / "tiling_version.txt", root / "tiling_in_progress.txt"
-    if not version.exists() or version.read_text().strip() != BOEHMK_PFS_TILING_VERSION:
-        if not building.exists() or building.read_text().strip() != BOEHMK_PFS_TILING_VERSION:
-            (root / "patches.parquet").unlink(missing_ok=True)
-            shutil.rmtree(slide_cache)
-            slide_cache.mkdir(parents=True, exist_ok=True)
-            building.write_text(BOEHMK_PFS_TILING_VERSION + "\n")
-    if not any(wsi_dir.rglob("*")):
-        tar = root / "data.tar.gz"
-        synapse_download(BOEHMK_PFS_SYNAPSE_TAR, tar)
-        shutil.unpack_archive(tar, wsi_dir)
-    slide_paths = {p.stem: p for p in wsi_dir.rglob("*") if p.is_file()}
-    workers = int(os.environ.get("PREPARE_WORKERS", os.cpu_count() or 8))
+    version = root / "tiling_version.txt"
+    if version.exists() and version.read_text().strip() != LEOPARD_BCR_TILING_VERSION:
+        for stale in ("patches.parquet", "labels.tsv"):
+            (root / stale).unlink(missing_ok=True)
+        shutil.rmtree(slide_cache)
+        slide_cache.mkdir(parents=True)
+    cohort = [(case, slides[0], event, days, str(raw_dir), str(slide_cache)) for case, slides, event, days in zip(splits["case_ids"], splits["case_slides"], splits["events"], splits["days"])]
+    workers = min(4, int(os.environ.get("PREPARE_WORKERS", os.cpu_count() or 4)))
+    print(f"  rebuilding LEOPARD BCR tile cache from official S3 TIFFs ({len(cohort)} slides, {workers} workers)", flush=True)
     with mp.Pool(workers) as pool:
-        for done, (sid, n) in enumerate(pool.imap_unordered(_tile_one_boehmk_pfs, [(slide_paths[sid], sid, str(slide_cache)) for sid in slide_ids]), start=1):
-            if done % 10 == 0 or done == len(slide_ids):
-                print(f"  [{done}/{len(slide_ids)}] latest={sid} tiles={n:,}", flush=True)
-    table = pa.concat_tables([pq.read_table(slide_cache / f"{sid}.parquet") for sid in slide_ids])
-    pq.write_table(table, root / "patches.parquet", compression="snappy", row_group_size=PARQUET_ROW_GROUP_SIZE)
-    version.write_text(BOEHMK_PFS_TILING_VERSION + "\n")
+        for done, (sid, n) in enumerate(pool.imap_unordered(_leopard_bcr_extract_one, cohort), start=1):
+            if done % 10 == 0 or done == len(cohort):
+                print(f"  [{done}/{len(cohort)}] latest={sid} tiles={n:,}", flush=True)
+    out_path = root / "patches.parquet"
+    tmp_path = out_path.with_suffix(".parquet.part")
+    writer = None
+    for _, sid, *_ in cohort:
+        table = pq.read_table(slide_cache / f"{sid}.parquet")
+        if writer is None:
+            writer = pq.ParquetWriter(tmp_path, table.schema, compression="snappy")
+        writer.write_table(table, row_group_size=PARQUET_ROW_GROUP_SIZE)
+    writer.close()
+    os.replace(tmp_path, out_path)
+    (root / "labels.tsv").write_text("case_id\tslide_id\tBCR_event\tBCR_days\n" + "\n".join(f"{case}\t{sid}\t{event}\t{day}" for case, sid, event, day, *_ in cohort) + "\n")
+    version.write_text(LEOPARD_BCR_TILING_VERSION + "\n")
     version.chmod(0o664)
-    building.unlink(missing_ok=True)
+    if root == Path("/data/leopard_bcr"):
+        make_hpcroot_writable(root)
 
 
 def _cptac_pda_os_extract_one(args):
@@ -628,6 +644,10 @@ def _cptac_pda_os_extract_one(args):
 
 
 def fetch_cptac_pda_os(root):
+    hf_probe_dir("cptac_pda_os", root)
+
+
+def fetch_cptac_pda_os_from_official_sources(root):
     bench = Path(__file__).resolve().parent / "benchmarking"
     splits = json.loads((bench / "cptac_pda_os.json").read_text())
     raw_dir, slide_cache = root / "raw", root / "slides_full"
@@ -664,12 +684,14 @@ def fetch_cptac_pda_os(root):
 
 # PathoROB ships as two HF datasets; TCGA subset is intentionally excluded.
 def fetch_pathorob(root):
-    from huggingface_hub import snapshot_download
-    for subset in ("camelyon", "tolkach_esca"):
-        snapshot_download(repo_id=f"bifold-pathomics/PathoROB-{subset}", repo_type="dataset", local_dir=str(root / subset))
+    hf_probe_dir("pathorob", root)
 
 
 def fetch_monusac(root):
+    hf_probe_dir("monusac", root)
+
+
+def fetch_monusac_from_official_source(root):
     import gdown
     Image.MAX_IMAGE_PIXELS = None
     zip_path = root / "monusac_train.zip"
@@ -716,11 +738,11 @@ def fetch_mhist(root):
 
 
 FETCHERS = {
-    "boehmk_pfs": fetch_boehmk_pfs,
     "bracs": fetch_bracs,
     "break_his": fetch_break_his,
     "consep": fetch_consep,
     "cptac_pda_os": fetch_cptac_pda_os,
+    "leopard_bcr": fetch_leopard_bcr,
     "mhist": fetch_mhist,
     "monusac": fetch_monusac,
     "pcam": fetch_pcam,
@@ -741,6 +763,10 @@ def _resolve(s):
 # so `prepare.py ... download=True` makes a fresh clone runnable by itself.
 def _local_data_root(s):
     p = _resolve(s)
+    if p == Path("/data/leopard_bcr") and Path("/data").exists() and os.access("/data", os.W_OK):
+        return str(s)
+    if p.is_absolute() and len(p.parts) > 3 and p.parts[1] == "data" and p.parts[3] == "nanopath" and Path("/data").exists() and os.access("/data", os.W_OK):
+        return str(s)
     if p.is_absolute() and len(p.parts) > 1 and p.parts[1] in {"data", "block"} and (not p.is_dir() or not any(p.iterdir())):
         return str(REPO_ROOT / "data" / p.name)
     return str(s)
@@ -822,12 +848,12 @@ def is_populated(name, p):
         got = set(pa.concat_tables([pq.read_table(f, columns=["slide_id"]) for f in files]).column("slide_id").to_pylist()) if files else set()
         version = p / "tiling_version.txt"
         return version.exists() and version.read_text().strip() == SURGEN_TILING_VERSION and expected <= labels and expected <= got
-    if name == "boehmk_pfs":
-        splits = json.loads((bench / "boehmk_pfs.json").read_text())
-        expected = set(splits["train"]["slide_ids"] + splits["val"]["slide_ids"])
+    if name == "leopard_bcr":
+        splits = json.loads((bench / "leopard_bcr.json").read_text())
+        expected = {sid for slides in splits["case_slides"] for sid in slides}
         got = set(pq.read_table(p / "patches.parquet", columns=["slide_id"]).column("slide_id").to_pylist()) if (p / "patches.parquet").exists() else set()
         version = p / "tiling_version.txt"
-        return version.exists() and version.read_text().strip() == BOEHMK_PFS_TILING_VERSION and (p / "labels.tsv").exists() and expected <= got
+        return version.exists() and version.read_text().strip() == LEOPARD_BCR_TILING_VERSION and (p / "labels.tsv").exists() and expected <= got
     if name == "cptac_pda_os":
         splits = json.loads((bench / "cptac_pda_os.json").read_text())
         expected = {sid for slides in splits["case_slides"] for sid in slides}
@@ -945,7 +971,7 @@ def main():
         f"\nAll data ready: {n_shards} parquet shards at {dataset_dir}, {n_probes} probe datasets "
         f"({', '.join(cfg['probe']['dataset_roots'])}), and {cfg['model']['type']} weights at "
         f"{weights_path}. Launch training with `python train.py {config_label}` or "
-        f"`sbatch submit/train_1gpu.sbatch {config_label}`.",
+        f"`./submit/train_1gpu.sbatch {config_label}`.",
         flush=True,
     )
 
