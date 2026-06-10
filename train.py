@@ -713,16 +713,18 @@ def main():
                 train_log.update(unique_counts)
                 if diag is not None:
                     layer_diags = diag.get("layers") or []
-                    sampled = [i for i in [0, 4, 8, 11] if i < len(layer_diags)]
-                    for idx in sampled:
-                        for k, v in layer_diags[idx].items():
-                            train_log[f"diag/{k}_L{idx}"] = v
-                    all_vals = {}
-                    for layer_d in layer_diags:
-                        for k, v in layer_d.items():
-                            all_vals.setdefault(k, []).append(v)
-                    for k, vals in all_vals.items():
-                        train_log[f"diag/{k}_mean"] = sum(vals) / len(vals)
+                    if layer_diags:
+                        stride = max(1, len(layer_diags) // 4)
+                        sampled_indices = list(range(0, len(layer_diags), stride))
+                        for idx in sampled_indices:
+                            for k, v in layer_diags[idx].items():
+                                train_log[f"diag/{k}/L{idx}"] = v
+                        all_vals = {}
+                        for layer_d in layer_diags:
+                            for k, v in layer_d.items():
+                                all_vals.setdefault(k, []).append(v)
+                        for k, vals in all_vals.items():
+                            train_log[f"diag/{k}/mean"] = sum(vals) / len(vals)
                     for key in ("final_cls", "final_reg", "final_patch"):
                         if diag.get(key) is not None:
                             train_log[f"diag/{key}"] = diag[key]
