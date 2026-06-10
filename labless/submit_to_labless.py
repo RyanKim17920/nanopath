@@ -423,7 +423,7 @@ def collect_source_context(main_ref: dict[str, str], summary: dict[str, Any], so
     subprocess.run(["git", "cat-file", "-e", f"{main_ref['commit']}^{{commit}}"], check=True)
     review_paths = [*REVIEW_DIFF_PATHS, *([] if config_rel in REVIEW_DIFF_PATHS else [config_rel])]
     main_diff = collect_main_diff(main_ref, commit, source_dir, review_paths)
-    review_files = collect_review_files(source, source_dir, review_paths)
+    review_files = collect_review_files(source, source_dir, review_paths, main_ref)
     source_changed_files = changed_source_paths(main_ref["commit"], source_dir)
     new_source_files = [path for path in source_changed_files if main_file(main_ref["commit"], path) is None and snapshot_file(source_dir, path) is not None]
     policy_errors = [f"helper file outside allowed surface changed: {path}" for path in source_changed_files if new_source_path_blocked(path)]
@@ -448,8 +448,14 @@ def collect_source_context(main_ref: dict[str, str], summary: dict[str, Any], so
     return repo
 
 
-def collect_review_files(source: str, source_dir: Path, review_paths: list[str]) -> dict[str, Any]:
-    files = {path: snapshot_text(source_dir, path) for path in review_paths}
+def collect_review_files(source: str, source_dir: Path, review_paths: list[str], main_ref: dict[str, str]) -> dict[str, Any]:
+    files: dict[str, str] = {}
+    for path in review_paths:
+        main_data, source_data = main_file(main_ref["commit"], path), snapshot_file(source_dir, path)
+        if main_data == source_data:
+            continue  # unchanged vs main -- nothing to review, so it adds no payload weight
+        patch, _summary, reason = file_diff(path, main_data, source_data)
+        files[path] = reason or patch
     review_files = {"source": source, "files": files}
     review_bytes = len(json.dumps(review_files, sort_keys=True).encode())
     if review_bytes > MAX_REVIEW_FILES_BYTES:
