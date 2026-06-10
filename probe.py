@@ -18,8 +18,8 @@
 #   pcam        ~28-50s      fixed 3072 train / 768 val subset of official H5 files
 #   ucla_lung   ~32-140s     full IDR idr0082 tissue grid, mean-pooled
 #   surgen      ~235-1137s   deterministic SR386 sub-bags -> mean-pool -> logistic regression
-#   boehmk_pfs   ~99-2361s   deterministic 768-tile sub-bag -> case-pool -> z-scored CoxPH
-#   cptac_pda_os ~150-2286s  full deterministic tile grid -> case-pool -> z-scored CoxPH
+#   leopard_bcr  ~150-2277s  deterministic 768-tile sub-bag -> case-pool -> z-scored CoxPH
+#   cptac_pda_os ~139-1492s  full deterministic tile grid -> case-pool -> z-scored CoxPH
 #   pathorob    ~28-198s     camelyon + tolkach_esca patch sets
 #   monusac     ~25-93s      3 train-derived folds, features extracted once
 #   consep      ~5-19s       3 train-derived folds, features extracted once
@@ -73,11 +73,11 @@ CLASSIFICATION_DATASETS = ["bracs", "break_his", "mhist", "pcam"]
 SEGMENTATION_DATASETS = ["pannuke", "monusac", "consep"]
 SLIDE_DATASETS = ["ucla_lung"]
 AUC_DATASETS = ["surgen"]
-SURVIVAL_DATASETS = ["boehmk_pfs", "cptac_pda_os"]
+SURVIVAL_DATASETS = ["leopard_bcr", "cptac_pda_os"]
 ROBUSTNESS_DATASETS = ["pathorob"]
 MEAN_PROBE_DATASETS = [
     "break_his", "bracs", "mhist", "pcam", "monusac", "consep",
-    "pannuke", "ucla_lung", "surgen", "boehmk_pfs", "cptac_pda_os", "pathorob",
+    "pannuke", "ucla_lung", "surgen", "leopard_bcr", "cptac_pda_os", "pathorob",
 ]
 MEAN_PROBE_METRICS = ["linear_mean_f1", "knn_mean_f1", "fewshot_mean_f1", "seg_mean_jaccard", "slide_mean_auc", "auc_mean", "survival_mean_cindex", "robustness_mean"]
 TASK_FIELDS = {
@@ -93,7 +93,7 @@ SURGEN_LR_MAX_ITER = 5000
 SURGEN_LR_SOLVER = "liblinear"
 SURGEN_TILES_PER_SLIDE = 768
 SURGEN_ROW_GROUP_SIZE = 64
-SURVIVAL_TILES_PER_SLIDE_CAPS = {"boehmk_pfs": 768, "cptac_pda_os": 0}  # 0 means uncapped.
+SURVIVAL_TILES_PER_SLIDE_CAPS = {"leopard_bcr": 768, "cptac_pda_os": 0}  # 0 means uncapped.
 SLIDE_LR_CS = (0.001, 0.01, 0.1, 0.5, 1.0, 10.0, 100.0)
 SURVIVAL_COXPH_ALPHA = 2.0
 PATHOROB_SUBSETS = {"camelyon": 11, "tolkach_esca": 46}
@@ -770,7 +770,7 @@ def inline_pathobench_survival(model, mean, std, dataset, device, transform):
     y = np.array(list(zip(pool_events, pool_days)), dtype=[("event", bool), ("days", float)])
     if "folds" in spec:
         case_to_i = {case_id: i for i, case_id in enumerate(unit_ids)}
-        fold_indices = [(np.asarray([case_to_i[c] for c in fold["train"]], dtype=np.int64), np.asarray([case_to_i[c] for c in fold["test"]], dtype=np.int64)) for fold in spec["folds"]]
+        fold_indices = [(np.asarray([case_to_i[c] for c in fold["train"]], dtype=np.int64), np.asarray([case_to_i[c] for c in fold["val"]], dtype=np.int64)) for fold in spec["folds"]]
     else:
         fold_indices = stratified_folds(pool_events.astype(np.int64))
     folds = []
@@ -780,7 +780,7 @@ def inline_pathobench_survival(model, mean, std, dataset, device, transform):
         Xtr, Xva = (X[tr] - mu) / sd, (X[va] - mu) / sd
         head = CoxPHSurvivalAnalysis(alpha=SURVIVAL_COXPH_ALPHA, n_iter=1000).fit(Xtr, y[tr])
         cindex = float(concordance_index_censored(y[va]["event"], y[va]["days"], head.predict(Xva))[0])
-        folds.append({"val_cindex": cindex, "train_cases": len(tr), "test_cases": len(va)})
+        folds.append({"val_cindex": cindex, "train_cases": len(tr), "val_cases": len(va)})
     val_cindex = float(np.mean([f["val_cindex"] for f in folds]))
     return {"val_cindex": val_cindex, "coxph_alpha": SURVIVAL_COXPH_ALPHA, "fold_scores": [float(f["val_cindex"]) for f in folds], "folds": folds, "tiles": tiles, "tiles_per_slide_cap": cap}, time.monotonic() - started_at
 
