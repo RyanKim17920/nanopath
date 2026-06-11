@@ -19,6 +19,11 @@ REPO_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CONFIG_FILE="${1:-${REPO_DIR}/configs/main.yaml}"
 [[ $# -gt 0 ]] && shift
 
+# Smoke runs must not write to wandb; wandb honors WANDB_MODE natively.
+case "$CONFIG_FILE" in
+  *smoke*) export WANDB_MODE=disabled; echo "smoke run: WANDB disabled" ;;
+esac
+
 cd "${REPO_DIR}"
 # Worktrees share the venv from the main checkout at /admin/home/$USER/nanopath.
 VENV_DIR="${REPO_DIR}/.venv"

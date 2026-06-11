@@ -574,6 +574,20 @@ def main():
     # 1e18 leaderboard cap reflects real GPU work.
     measured_flops_per_step = None
 
+    # Wandb groups panels by the prefix before the first "/". Route losses + grad/lr + val
+    # losses into main-train-results/, everything else (non-diag, non-probe) into
+    # train-tracking/. diag/ and probe/ keys keep their existing prefix. metrics.jsonl stays
+    # unprefixed. Note: the jepa loss is carried by the "ibot" key, which is in _MAIN_KEYS.
+    _MAIN_KEYS = {"dino", "ibot", "kde", "total", "grad_norm", "lr",
+                  "val_dino", "val_ibot", "val_kde", "val_total"}
+
+    def _panel(k):
+        if k.startswith("diag/"):
+            return k
+        if k in _MAIN_KEYS:
+            return f"main-train-results/{k}"
+        return f"train-tracking/{k}"
+
     while examples_seen + batch_size <= max_train_samples and train_flops < max_train_flops:
         for batch in train_loader:
             if examples_seen + batch_size > max_train_samples or train_flops >= max_train_flops:
@@ -743,7 +757,7 @@ def main():
                 with metrics_path.open("a") as handle:
                     handle.write(json.dumps(train_log) + "\n")
                 wandb_run.log(
-                    {f"train/{key}": value for key, value in train_log.items() if key != "step"},
+                    {_panel(key): value for key, value in train_log.items() if key != "step"},
                     step=completed_step,
                 )
                 log_probe_results()
@@ -760,7 +774,7 @@ def main():
                 val_log = {"step": completed_step, **{f"val_{k}": v for k, v in val.items()}}
                 with metrics_path.open("a") as handle:
                     handle.write(json.dumps(val_log) + "\n")
-                wandb_run.log({f"val/{k}": v for k, v in val.items()}, step=completed_step)
+                wandb_run.log({_panel(f"val_{k}"): v for k, v in val.items()}, step=completed_step)
                 print(f"{console_prefix()} Validation  [{completed_step}]  total: {val['total']:.4f}  dino: {val['dino']:.4f}  ibot: {val['ibot']:.4f}  kde: {val['kde']:.4f}", flush=True)
             step = completed_step
             data_wait_started_at = time.monotonic()

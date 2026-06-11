@@ -172,15 +172,26 @@ class DinoV2ViT(nn.Module):
         x = self._prepare_tokens(x, masks)
         if log_diagnostics:
             clear_diags()
+            _token_norms = []
             for blk in self.blocks:
                 x = blk(x, log_diagnostics=True)
+                r = self.registers
+                _token_norms.append({
+                    "cls_norm":   float(x[:, 0].norm(dim=-1).mean().detach()),
+                    "reg_norm":   float(x[:, 1:1 + r].norm(dim=-1).mean().detach()) if r > 0 else 0.0,
+                    "patch_norm": float(x[:, 1 + r:].norm(dim=-1).mean().detach()),
+                })
             x = self.norm(x)
             result = {
                 "x_norm_clstoken": x[:, 0],
                 "x_norm_regtokens": x[:, 1 : 1 + self.registers],
                 "x_norm_patchtokens": x[:, 1 + self.registers :],
             }
-            result["_diagnostics"] = collect_diags()
+            _layers = collect_diags()
+            for i, tn in enumerate(_token_norms):
+                if i < len(_layers):
+                    _layers[i].update(tn)
+            result["_diagnostics"] = _layers
             result["_final_norm_cls"] = float(x[:, 0].norm(dim=-1).mean().detach())
             result["_final_norm_reg"] = float(x[:, 1 : 1 + self.registers].norm(dim=-1).mean().detach())
             result["_final_norm_patch"] = float(x[:, 1 + self.registers :].norm(dim=-1).mean().detach())

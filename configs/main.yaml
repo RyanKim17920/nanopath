@@ -2,13 +2,13 @@ project:
   name: main-dinov2
   family: nanopath
   recipe_id: dinov2-vits14-reg-kde
-  output_dir: /data/$USER/nanopath/main/default
+  output_dir: /data/ryan.kim/nanopath/main/jepa-curated-v7
   wandb_dir: /data/$USER/nanopath/wandb
 
 data:
   # dataset_dir holds the parquet shards (shard-NNNNN.parquet) that train.py reads.
   # `prepare.py … download=True` populates it from the medarc/nanopath HF mirror.
-  dataset_dir: /data/nanopath_parquet
+  dataset_dir: /data/nanopath-curated-genbiopathfm/curated-shards
   split_seed: 7777
   val_fraction: 0.05
   mean: [0.485, 0.456, 0.406]
@@ -27,13 +27,14 @@ train:
   seed: 7777
   bf16: true
   activation_checkpointing: false
-  batch_size: 128
+  batch_size: 256 # raised 128->256 to fill GPU
   num_workers: 16
   prefetch_factor: 2
   persistent_workers: true
   max_train_samples: 1000000 # tile presentations; global/local crops still count as one sample
   max_train_flops: 1000000000000000000 # 1.0e18, the leaderboard FLOP budget
   log_every: 20
+  log_diagnostics_every: 100
   save_every: 1000
   # Validation pass every `eval_every` steps over `val_batches` held-out batches
   eval_every: 200
