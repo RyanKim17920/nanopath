@@ -1,0 +1,16 @@
+{
+  "_source": "Canonical jepa frozen-base baseline transcribed from base-models/baselines.json (jepa.out). This is the anchor score evo experiments must beat; NOT a retrain. Real experiments overwrite this file with the SLURM run's own summary.json before `evo run`.",
+  "final_probe_linear_mean_f1": 0.7842,
+  "final_probe_knn_mean_f1": 0.7061,
+  "final_probe_fewshot_mean_f1": 0.6383,
+  "final_probe_seg_mean_jaccard": 0.2891,
+  "final_probe_slide_mean_auc": 0.6575,
+  "final_probe_auc_mean": 0.6162,
+  "final_probe_survival_mean_cindex": 0.5783,
+  "final_probe_robustness_mean": 0.8855,
+  "final_probe_score": 0.6444,
+  "max_train_samples": 1000000,
+  "tile_presentations": 1000000,
+  "max_train_flops": 1000000000000000000,
+  "stop_reason": "max_train_samples"
+}
