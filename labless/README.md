@@ -155,21 +155,20 @@ The payload intentionally makes the run inspectable. It includes:
 The public API redacts local machine paths, hostnames, users, repo roots, and
 local artifact paths from legacy and new rows.
 
-Agents can crawl the public experiment ledger directly:
+Agents can crawl the public experiment ledger directly with the JSON API:
 
 ```bash
 curl -fsS "https://api.labless.dev/api/nano-projects/nanopath/experiment-log?limit=100" \
   | jq '.runs[] | {run_id, title, validation, metric_value, summary}'
-
-curl -fsS "https://api.labless.dev/api/nano-projects/nanopath/experiment-log.jsonl?limit=500" \
-  | jq -r '[.run_id, .metric_value, .validation, .summary] | @tsv'
 ```
 
-Use `next_after_updated_at` plus `next_after_run_id` to page through older
-responses, and store `watermark_updated_at` plus `watermark_run_id` when polling
-later. The bulk rows include compact public source context and links to the
-website run page, run-detail JSON, and review patch endpoint. Labless does not
-currently expose raw console logs or full per-step `metrics.jsonl` histories.
+Fetch the first page, inspect `runs[]`, then follow a row's `api_url` for full
+run-detail JSON or `review_patch_url` for a source patch when one is available.
+Use `next_after_updated_at` plus `next_after_run_id` to request the next page.
+When there is no next page, save `watermark_updated_at` plus `watermark_run_id`
+and send them later to poll for newly submitted, renamed, re-noted, or
+revalidated runs. Labless does not currently expose raw console logs or full
+per-step `metrics.jsonl` histories.
 
 The review snapshot is only collected for `train.py`, `model.py`,
 `dataloader.py`, `prepare.py`, and the config YAML used by the run. Labless
