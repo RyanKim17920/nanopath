@@ -208,11 +208,42 @@ class DinoV2ViT(nn.Module):
             "x_norm_patchtokens": x[:, 1 + self.registers :],
         }
 
+    # Collect patch tokens from the last `n` transformer blocks (DINOv2's
+    # get_intermediate_layers dense recipe) and FUSE them by summation. Each block's
+    # output is passed through the shared final LayerNorm, the patch tokens are taken,
+    # and the `n` layers are summed elementwise — keeping the feature dim at `dim`
+    # (NOT n*dim as concat would). Returns (B, n_patches, dim) of depth-fused patch
+    # features. Read ONLY by the segmentation probe via encode_image; training/forward()
+    # and the CLS-token classification probes are untouched, so it cannot perturb any
+    # non-seg probe. Sum (vs exp_0032's concat) gives the seg head a native-width readout:
+    # complementary depth information is averaged in place rather than widening the head's
+    # encoder dim 4x, for a cleaner head fit and lower readout variance.
+    @torch.no_grad()
+    def _intermediate_patch_tokens_sum(self, x, n=4):
+        x = self._prepare_tokens(x)
+        depth = len(self.blocks)
+        take = set(range(depth - n, depth))
+        fused = None
+        for i, blk in enumerate(self.blocks):
+            x = blk(x)
+            if i in take:
+                patches = self.norm(x)[:, 1 + self.registers:]
+                fused = patches if fused is None else fused + patches
+        return fused
+
     # Probe contract: encode_image returns [registers || patches] for the seg head;
     # probe_features returns the cls token for classification probes.
+    # Decode geometry: hand the seg head depth-fused (last-4, SUMMED) patch tokens
+    # instead of only the final CLS-optimized layer. The probe slices `[:, registers:]`,
+    # so the leading register slots are discarded — we keep the same register count as
+    # zero padding and place the fused patch features after it. Patch-token COUNT is
+    # unchanged (the head infers grid size from it); the channel dim STAYS at `dim`
+    # (sum fusion), and the head's d_encoder adapts to feats.shape[-1] automatically.
     def encode_image(self, x, checkpoint=False):
-        out = self(x, checkpoint=checkpoint)
-        return torch.cat([out["x_norm_regtokens"], out["x_norm_patchtokens"]], dim=1)
+        patches = self._intermediate_patch_tokens_sum(x, n=4)
+        b, _, d = patches.shape
+        reg_pad = patches.new_zeros(b, self.registers, d)
+        return torch.cat([reg_pad, patches], dim=1)
 
     def probe_features(self, x):
         return self(x)["x_norm_clstoken"]
