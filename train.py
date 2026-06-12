@@ -659,7 +659,13 @@ def main():
                 print(f"{console_prefix()} measured_flops_per_step: {measured_flops_per_step:,}", flush=True)
             step_train_flops = measured_flops_per_step
             with torch.no_grad():
-                m = cosine_schedule(0.994, 1.0, frac)
+                # EMA-momentum reshape (exp_0028, PURE EMA axis): lower start 0.994->0.992 keeps the
+                # shared teacher more mobile early (faster tracking of the rapidly-learning encoder so it
+                # does NOT lock in a low-discriminative-rank CLS target); lower end 1.0->0.9998 keeps the
+                # teacher slightly mobile at the end instead of fully freezing a stale target, so the
+                # target geometry keeps absorbing fine class structure across the 1-epoch/1M-tile budget.
+                # Symmetric across backbone + heads (no head/backbone asymmetry, cf. failed exp_0015).
+                m = cosine_schedule(0.992, 0.9998, frac)
                 update_ema(student_backbone, teacher_backbone, m)
                 update_ema(student_dino_head, teacher_dino_head, m)
                 if not jepa:
