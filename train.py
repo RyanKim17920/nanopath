@@ -477,6 +477,28 @@ def main():
         else:
             s_patch = student_ibot_head(sg["x_norm_patchtokens"].flatten(0, 1)[mask_idx])
             ibot_loss = float(dino_cfg.get("ibot_loss_weight", 1.0)) * -(t_patch_prob * F.log_softmax(s_patch / 0.1, dim=-1)).sum(-1).mul(mask_w).sum() / max(1, b * 2)
+        # Cross-view mean-patch consistency: pathorob embeds [CLS || mean-of-patch-tokens] from the
+        # final-norm forward output, so its robustness index is set by mean-pooled patch separability
+        # across medical-center (stain/scanner) shift. The two global views are independent augmentations
+        # of the SAME tile -> an in-dataset proxy for that shift. Pull each view's STUDENT visible-patch
+        # mean toward the EMA-TEACHER full-patch mean of the OTHER view (symmetric, stop-grad teacher),
+        # layer-normed smooth-L1 to match the JEPA target scale. This injects augmentation-invariance into
+        # the exact pooled readout pathorob reads, WITHOUT per-patch dense pressure (it pools first) and
+        # WITHOUT touching CLS geometry or encode_image.
+        cv_w = float(dino_cfg.get("cross_view_patch_weight", 0.0))
+        if cv_w > 0.0 and train_cfg["global_views"] == 2:
+            visible = (~masks).unsqueeze(-1).to(sg["x_norm_patchtokens"].dtype)  # [2b, P, 1]
+            s_mean = (sg["x_norm_patchtokens"] * visible).sum(1) / visible.sum(1).clamp(min=1.0)  # [2b, D]
+            t_mean = t["x_norm_patchtokens"].mean(1)  # [2b, D] teacher full-patch, stop-grad (no_grad)
+            s0, s1 = s_mean.chunk(2)
+            t0, t1 = t_mean.chunk(2)
+            ed = (student_backbone.embed_dim,)
+            s0n, s1n = F.layer_norm(s0, ed), F.layer_norm(s1, ed)
+            t0n, t1n = F.layer_norm(t0, ed), F.layer_norm(t1, ed)
+            cv_loss = cv_w * 0.5 * (
+                F.smooth_l1_loss(s0n, t1n) + F.smooth_l1_loss(s1n, t0n)
+            )
+            ibot_loss = ibot_loss + cv_loss
         kde = dino_cfg["kde_loss_weight"] * k_scale * sum(kde_loss(x, dino_cfg["kde_concentration"]) for x in sg["x_norm_clstoken"].chunk(train_cfg["global_views"]))
         diag = None
         if log_diag:

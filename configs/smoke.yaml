@@ -59,6 +59,7 @@ dino:
   clip_grad: 3.0
   kde_loss_weight: 0.002
   kde_concentration: 10.0
+  cross_view_patch_weight: 0.1
 
 probe:
   enabled: true

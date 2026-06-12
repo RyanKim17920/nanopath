@@ -59,6 +59,10 @@ dino:
   clip_grad: 3.0
   kde_loss_weight: 0.005
   kde_concentration: 10.0
+  # Cross-view mean-patch consistency weight: pulls the two global augmentation-views' mean-pooled
+  # patch embeddings together (pathorob reads [CLS || mean-patch]); small so it does not impose
+  # per-patch dense pressure. Requires global_views == 2 (the default).
+  cross_view_patch_weight: 0.1
 
 probe:
   enabled: true
