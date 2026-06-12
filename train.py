@@ -613,7 +613,7 @@ def main():
                 lr = dino_cfg["lr"] * warmup
             else:
                 lr = cosine_schedule(dino_cfg["lr"], dino_cfg["lr_min"], (frac - warmup_fraction) / max(1e-9, 1 - warmup_fraction))
-            wd = cosine_schedule(0.04, 0.2, frac)
+            wd = cosine_schedule(0.04, 0.1, frac)  # WD ceiling lowered 0.2->0.1: reduces over-regularization at end of short 1-epoch run
             teacher_temp = 0.04 + min(1.0, frac / 0.2727) * (0.07 - 0.04)
             last_layer_lr = 0.0 if frac < dino_cfg["freeze_last_layer_fraction"] else lr
             for group in opt.param_groups:
@@ -659,7 +659,7 @@ def main():
                 print(f"{console_prefix()} measured_flops_per_step: {measured_flops_per_step:,}", flush=True)
             step_train_flops = measured_flops_per_step
             with torch.no_grad():
-                m = cosine_schedule(0.994, 1.0, frac)
+                m = cosine_schedule(0.996, 1.0, frac)  # EMA start raised 0.994->0.996: slower teacher update preserves pretrained knowledge longer
                 update_ema(student_backbone, teacher_backbone, m)
                 update_ema(student_dino_head, teacher_dino_head, m)
                 if not jepa:

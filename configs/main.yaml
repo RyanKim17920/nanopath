@@ -47,10 +47,10 @@ train:
 
 dino:
   lr: 1.0e-4
-  lr_min: 1.0e-6
+  lr_min: 5.0e-6  # raised 1e-6->5e-6: less aggressive late-training LR decay preserves CLS rep
   adam_beta2: 0.99
-  warmup_fraction: 0.03
-  freeze_last_layer_fraction: 0.0091
+  warmup_fraction: 0.10  # extended 0.03->0.10: longer warmup avoids damaging pretrained features early
+  freeze_last_layer_fraction: 0.03  # extended 0.0091->0.03: keep DINO head last layer frozen longer to protect CLS geometry
   layerwise_decay: 0.7
   patch_embed_lr_mult: 0.2
   drop_path_rate: 0.1
