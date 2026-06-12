@@ -281,7 +281,9 @@ def main():
     train_flops = 0
     output_dir = Path(cfg["project"]["output_dir"])
     wandb_dir = Path(cfg["project"]["wandb_dir"])
-    wandb_name = cfg["project"]["name"]
+    # Make the run identity legible (output_dir basename = evo exp id or the run's own name),
+    # so wandb runs are distinguishable instead of all sharing the static project name.
+    wandb_name = f"{cfg['project']['name']}-{output_dir.name}"
     if labless_autosubmit_file:
         wandb_name = json.loads(Path(labless_autosubmit_file).read_text()).get("run_name") or wandb_name
     slurm_job_id = os.environ.get("SLURM_JOB_ID")
