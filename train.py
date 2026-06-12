@@ -138,12 +138,17 @@ def cosine_schedule(start, end, frac):
 
 
 # Sinkhorn-Knopp centring across this batch, used as DINO/iBOT teacher targets.
+# Gentle teacher-prototype centering: 5 (vs 3) Sinkhorn iterations converge the
+# optimal-transport assignment closer to doubly-stochastic, so prototype usage is
+# more uniformly balanced across the batch -> better-spread teacher CLS targets.
+# This sharpens knn/few-shot embedding structure via prototype geometry, NOT via
+# stronger repulsion (kde weight/concentration and teacher_temp are untouched).
 def sinkhorn(x, temp):
     q = torch.exp(x.float() / temp).t()
     b = q.shape[1]
     k = q.shape[0]
     q /= q.sum()
-    for _ in range(3):
+    for _ in range(5):
         q /= q.sum(1, keepdim=True) * k
         q /= q.sum(0, keepdim=True) * b
     return (q * b).t()
