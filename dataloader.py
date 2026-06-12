@@ -13,7 +13,7 @@
 # stays cleanly out-of-distribution from optimization.
 #
 # Augmentation per view: RandomResizedCrop -> optional HEDJitter -> horizontal/
-# vertical flips -> ColorJitter -> occasional grayscale/blur -> Normalize.
+# vertical flips -> ColorJitter (with optional hue jitter) -> occasional grayscale/blur -> Normalize.
 #
 # This file is the *pretraining* input pipeline only. The downstream probes
 # (probe.py) do not import anything from here.
@@ -135,7 +135,7 @@ class TCGATileDataset(Dataset):
                 *([HEDJitter(data["hed_jitter"])] if data["hed_jitter"] > 0 else []),
                 v2.RandomHorizontalFlip(),
                 v2.RandomVerticalFlip(),
-                v2.ColorJitter(data["color_jitter"], data["color_jitter"], data["color_jitter_saturation"], 0.0),
+                v2.ColorJitter(data["color_jitter"], data["color_jitter"], data["color_jitter_saturation"], data.get("color_jitter_hue", 0.0)),
                 v2.RandomGrayscale(p=0.1),
                 v2.RandomApply([v2.GaussianBlur(9, sigma=(0.1, 1.8))], p=0.35),
                 v2.Normalize(mean=mean, std=std),
@@ -148,7 +148,7 @@ class TCGATileDataset(Dataset):
                 *([HEDJitter(data["hed_jitter"])] if data["hed_jitter"] > 0 else []),
                 v2.RandomHorizontalFlip(),
                 v2.RandomVerticalFlip(),
-                v2.ColorJitter(data["color_jitter"], data["color_jitter"], data["color_jitter_saturation"], 0.0),
+                v2.ColorJitter(data["color_jitter"], data["color_jitter"], data["color_jitter_saturation"], data.get("color_jitter_hue", 0.0)),
                 v2.RandomGrayscale(p=0.1),
                 v2.RandomApply([v2.GaussianBlur(9, sigma=(0.1, 1.8))], p=0.35),
                 v2.Normalize(mean=mean, std=std),

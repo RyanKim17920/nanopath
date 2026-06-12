@@ -17,7 +17,8 @@ data:
   local_crop_scale: [0.03, 0.25]
   color_jitter: 0.45
   color_jitter_saturation: 0.4
-  hed_jitter: 0.12
+  color_jitter_hue: 0.10
+  hed_jitter: 0.18
   tissue_thresh: 0.5 # training rejects tiles unless this fraction of pixels has RGB saturation > 0.07
 
 model:
