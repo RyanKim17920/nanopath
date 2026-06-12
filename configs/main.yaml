@@ -59,6 +59,10 @@ dino:
   clip_grad: 3.0
   kde_loss_weight: 0.005
   kde_concentration: 10.0
+  # exp_0024 survival-conditioning lever: dedicated weight-decay multiplier on the trunk-final
+  # LayerNorm affine (the CLS per-dim scale the survival CoxPH z-scoring reads). 0.0 = baseline
+  # (final norm escapes WD, as in stock DinoV2); 1.0 = full cosine WD like weight matrices.
+  final_norm_wd_mult: 1.0
 
 probe:
   enabled: true

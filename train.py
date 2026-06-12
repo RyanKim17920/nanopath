@@ -192,7 +192,7 @@ def make_block_mask(batch, grid, device, n_blocks=4, block_scale=0.10):
 # block i gets lr * layerwise_decay^(depth - 1 - i); patch_embed gets the deepest decay
 # multiplied by patch_embed_lr_mult; biases and norms get no weight decay; the head's
 # final weight-norm last_layer parameters get an LR-freeze for the first dino.freeze_last_layer_fraction.
-def build_param_groups(student_backbone, head_modules, layerwise_decay, patch_embed_lr_mult):
+def build_param_groups(student_backbone, head_modules, layerwise_decay, patch_embed_lr_mult, final_norm_wd_mult=0.0):
     depth = len(student_backbone.blocks)
     # Coalesce params that share (lr_mult, wd_mult, last_layer) into a single group each (~30 groups
     # instead of one-per-param), so AdamW's foreach path fuses the step across many tensors rather than
@@ -209,6 +209,16 @@ def build_param_groups(student_backbone, head_modules, layerwise_decay, patch_em
             elif kind == "backbone" and name.startswith("patch_embed."):
                 lr_mult = (layerwise_decay ** depth) * patch_embed_lr_mult
             wd_mult = 0.0 if name.endswith("bias") or "norm" in name or p.ndim < 2 else 1.0
+            # Survival/Cox conditioning lever (exp_0024): the trunk-final LayerNorm (`self.norm` ->
+            # param names exactly `norm.weight`/`norm.bias`) is the per-dimension scale on the CLS token
+            # that `probe_features` returns and that the survival CoxPH reads (tile-mean -> case-mean ->
+            # per-dim z-score -> fixed-ridge Cox). Default DinoV2 leaves it at wd_mult=0, so its per-dim
+            # gains drift anisotropically over training; z-scoring then amplifies the collapsed dimensions
+            # into noise in the Cox linear predictor. Giving ONLY this norm a small dedicated weight decay
+            # equalizes its per-dim gains -> better-conditioned (less anisotropic) CLS covariance for the
+            # z-scored Cox readout. Block norms keep wd_mult=0, so linear/knn CLS geometry is untouched.
+            if kind == "backbone" and name in ("norm.weight", "norm.bias"):
+                wd_mult = float(final_norm_wd_mult)
             key = (lr_mult, wd_mult, "last_layer" in name)
             coalesced.setdefault(key, {"params": [], "lr_mult": lr_mult, "wd_mult": wd_mult, "last_layer": key[2]})["params"].append(p)
     return list(coalesced.values())
@@ -271,7 +281,7 @@ def main():
             p.requires_grad = False
     backbone_activated_params = sum(p.numel() for p in student_backbone.parameters() if p.requires_grad)
     # AdamW param groups carry per-parameter LR/WD multipliers (LWD + patch_embed + biases-no-WD).
-    opt = torch.optim.AdamW(build_param_groups(student_backbone, [student_dino_head, *patch_modules], dino_cfg["layerwise_decay"], dino_cfg["patch_embed_lr_mult"]), lr=1.0, betas=(0.9, dino_cfg["adam_beta2"]))
+    opt = torch.optim.AdamW(build_param_groups(student_backbone, [student_dino_head, *patch_modules], dino_cfg["layerwise_decay"], dino_cfg["patch_embed_lr_mult"], final_norm_wd_mult=float(dino_cfg.get("final_norm_wd_mult", 0.0))), lr=1.0, betas=(0.9, dino_cfg["adam_beta2"]))
     warmup_fraction = float(dino_cfg.get("warmup_flop_fraction", dino_cfg.get("warmup_fraction", 0.03)))
     step = 0
     batch_size = int(train_cfg["batch_size"])
