@@ -15,12 +15,21 @@
 # Augmentation per view: RandomResizedCrop -> optional HEDJitter -> horizontal/
 # vertical flips -> ColorJitter -> occasional grayscale/blur -> Normalize.
 #
+# Tissue-density sampling: at dataset init, JPEG byte sizes for all tiles are
+# read (no pixel decode required) and stored as a per-tile density proxy. Tiles
+# with larger JPEG files contain more texture (less compressible = denser tissue).
+# WeightedRandomSampler uses these scores to up-sample tissue-dense tiles, which
+# removes the per-item rejection retry loop and biases the training distribution
+# toward informative crops. The scores are cached to disk on the first run
+# (dataset_dir/tissue_density_cache.npy) so subsequent runs load in <1 s.
+#
 # This file is the *pretraining* input pipeline only. The downstream probes
 # (probe.py) do not import anything from here.
 
 import hashlib
 import io
 import random
+import time
 from pathlib import Path
 
 import numpy as np
@@ -28,7 +37,7 @@ import pyarrow.parquet as pq
 import torch
 import torch.nn as nn
 from PIL import Image
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, WeightedRandomSampler
 from torchvision.transforms import v2
 
 
@@ -85,6 +94,54 @@ class HEDJitter(nn.Module):
         return torch.exp(log_rgb).clamp_(0.0, 1.0).permute(2, 0, 1)
 
 
+# Build or load a per-tile tissue-density score array (one float32 per tile in shard order).
+# Uses JPEG byte size as a compression-entropy proxy for tissue density: tissue-dense
+# tiles have more texture → larger JPEG files. Reads the jpeg binary column length without
+# pixel decoding; total cost ~140-210s for 4M tiles, cached to disk afterwards.
+# Cache key embeds shard count + total row count to detect dataset changes.
+def _build_tissue_density_cache(shards, cache_path):
+    t0 = time.monotonic()
+    all_sizes = []
+    for i, shard_path in enumerate(shards):
+        pf = pq.ParquetFile(str(shard_path), memory_map=True)
+        tbl = pf.read(columns=["jpeg"])
+        col = tbl["jpeg"]
+        for j in range(len(col)):
+            all_sizes.append(len(col[j].as_py()))
+        if (i + 1) % 20 == 0 or i == len(shards) - 1:
+            elapsed = time.monotonic() - t0
+            eta = elapsed / (i + 1) * (len(shards) - i - 1)
+            print(
+                f"[tissue-density cache] shard {i+1}/{len(shards)}  "
+                f"tiles={len(all_sizes):,}  elapsed={elapsed:.0f}s  eta={eta:.0f}s",
+                flush=True,
+            )
+    sizes = np.array(all_sizes, dtype=np.float32)
+    np.save(str(cache_path), sizes)
+    print(
+        f"[tissue-density cache] saved {len(sizes):,} tile sizes to {cache_path}  "
+        f"(total {time.monotonic()-t0:.0f}s)",
+        flush=True,
+    )
+    return sizes
+
+
+def _load_or_build_tissue_density(shards, dataset_dir):
+    # Cache key: number of shards + total tiles (if dataset changes, rebuild).
+    total_tiles = sum(pq.read_metadata(str(s)).num_rows for s in shards)
+    cache_path = Path(dataset_dir) / f"tissue_density_cache_{len(shards)}s_{total_tiles}t.npy"
+    if cache_path.exists():
+        sizes = np.load(str(cache_path))
+        print(f"[tissue-density cache] loaded {len(sizes):,} tile sizes from {cache_path}", flush=True)
+        return sizes
+    print(
+        f"[tissue-density cache] building density proxy for {total_tiles:,} tiles "
+        f"across {len(shards)} shards (one-time ~2-4 min, cached afterwards) ...",
+        flush=True,
+    )
+    return _build_tissue_density_cache(shards, cache_path)
+
+
 # Map-style TCGA tile dataset that emits global/local multi-view stacks for train.py.
 class TCGATileDataset(Dataset):
     # Glob shards, build a (shard_idx, row_in_shard) index over the requested patient
@@ -107,23 +164,67 @@ class TCGATileDataset(Dataset):
         # Lazy ParquetFile handles, opened on first __getitem__ in each worker
         # so fork-children own their own file positions.
         self._readers = [None] * len(self.shards)
+
+        # Tissue-density score per tile (indexed in flat shard order) — used to
+        # build per-split sampler weights. Only loaded for the training split to
+        # avoid the ~140s scan overhead on validation init.
+        flat_density = None
+        if is_train and float(data.get("density_sampler_temp", 0.0)) > 0:
+            flat_density = _load_or_build_tissue_density(self.shards, dataset_dir)
+
         # Pull just the path column from each shard once to build the train index;
         # the JPEG bytes column stays on disk until __getitem__.
         in_split_shard = []
         in_split_row = []
+        # flat_offset tracks the cumulative row index across all shards for density lookup.
+        flat_offset = 0
+        flat_density_split = [] if flat_density is not None else None
+        shard_row_counts = []
         for shard_idx, shard_path in enumerate(self.shards):
             paths = pq.read_table(str(shard_path), columns=["path"], memory_map=True)["path"].to_pylist()
+            shard_row_counts.append(len(paths))
             for row_idx, p in enumerate(paths):
                 # XOR with is_train: training keeps tiles where patient_in_val is False,
                 # validation keeps the complement.
                 if patient_in_val(patient_id_from_relpath(p), data["split_seed"], data["val_fraction"]) != is_train:
                     in_split_shard.append(shard_idx)
                     in_split_row.append(row_idx)
+                    if flat_density_split is not None:
+                        flat_density_split.append(float(flat_density[flat_offset + row_idx]))
+            flat_offset += len(paths)
         if not in_split_shard:
             raise ValueError(f"no {'train' if is_train else 'val'} tiles found in {dataset_dir}; check val_fraction={data['val_fraction']}")
         # Two parallel int32 arrays (~32 MB total for 4M tiles) shared COW across DataLoader fork-workers.
         self.shard_of = np.asarray(in_split_shard, dtype=np.int32)
         self.row_of = np.asarray(in_split_row, dtype=np.int32)
+
+        # Compute per-tile sampler weights from JPEG-size density proxy using
+        # softmax with temperature `density_sampler_temp`. Lower temp → sharper
+        # upweighting of the densest tiles. temp=0 disables density sampling.
+        # Weights are stored as float32; the caller passes them to WeightedRandomSampler.
+        self.sample_weights = None
+        if flat_density_split is not None:
+            temp = float(data.get("density_sampler_temp", 0.0))
+            scores = np.array(flat_density_split, dtype=np.float64)
+            # Normalize JPEG sizes to [0,1] range, then scale by temperature before softmax.
+            lo, hi = scores.min(), scores.max()
+            if hi > lo:
+                scores = (scores - lo) / (hi - lo)
+            else:
+                scores = np.ones_like(scores)
+            # Softmax over (score / temp): dense tiles get higher probability.
+            scores = scores / max(temp, 1e-6)
+            scores = scores - scores.max()  # numerical stability
+            weights = np.exp(scores).astype(np.float32)
+            # Guard: ensure no zero/nan weights so WeightedRandomSampler doesn't stall.
+            weights = np.clip(weights, 1e-8, None)
+            self.sample_weights = weights
+            print(
+                f"[tissue-density sampler] {len(weights):,} train tiles  "
+                f"temp={temp}  weight ratio top1%/bot1% = "
+                f"{np.percentile(weights,99)/np.percentile(weights,1):.1f}x",
+                flush=True,
+            )
         mean, std = data["mean"], data["std"]
         self.global_views = int(train["global_views"])
         self.local_views = int(train["local_views"])
@@ -160,9 +261,14 @@ class TCGATileDataset(Dataset):
         return int(self.shard_of.shape[0])
 
     # Read one JPEG row, decode, apply augmentations, and return train.py fields.
+    # When density sampling is active (sample_weights is set), WeightedRandomSampler
+    # already biases toward tissue-dense tiles at index selection time, so no
+    # per-item rejection loop is needed. The tissue_thresh fallback is retained
+    # for non-density-sampler configs.
     def __getitem__(self, idx):
         idx = int(idx)
-        for _ in range(9):
+        use_rejection = self.tissue_thresh > 0 and self.sample_weights is None
+        for _ in range(9 if use_rejection else 1):
             shard_idx = int(self.shard_of[idx])
             row_idx = int(self.row_of[idx])
             reader = self._readers[shard_idx]
@@ -179,7 +285,7 @@ class TCGATileDataset(Dataset):
             jpeg_bytes = table["jpeg"][row_in_rg].as_py()
             with Image.open(io.BytesIO(jpeg_bytes)) as img:
                 tile = self.to_tensor(img.convert("RGB"))
-            if self.tissue_thresh <= 0:
+            if not use_rejection:
                 break
             sat = (tile.amax(0) - tile.amin(0)) / (tile.amax(0) + 1e-6)
             if float((sat > 0.07).float().mean()) >= self.tissue_thresh:

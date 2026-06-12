@@ -26,7 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import wandb
 import yaml
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch.utils.flop_counter import FlopCounterMode
 
 from dataloader import TCGATileDataset, TILE_SIZE
@@ -390,7 +390,22 @@ def main():
     loader_kwargs = dict(batch_size=batch_size, drop_last=True, num_workers=train_cfg["num_workers"], pin_memory=True,
                          prefetch_factor=train_cfg["prefetch_factor"] if train_cfg["num_workers"] > 0 else None,
                          persistent_workers=train_cfg["persistent_workers"] and train_cfg["num_workers"] > 0)
-    train_loader = DataLoader(train_ds, shuffle=True, **loader_kwargs)
+    # When tissue-density sampling is active, replace shuffle with WeightedRandomSampler
+    # so dense-tissue tiles are visited proportionally more often. The sampler draws
+    # with replacement over the full training set (num_samples = len(train_ds)), which
+    # is equivalent in expectation to a weighted shuffle for the purposes of the
+    # max_train_samples budget loop below.
+    if train_ds.sample_weights is not None:
+        import torch as _torch
+        _weights_tensor = _torch.from_numpy(train_ds.sample_weights)
+        train_sampler = WeightedRandomSampler(
+            weights=_weights_tensor,
+            num_samples=len(train_ds),
+            replacement=True,
+        )
+        train_loader = DataLoader(train_ds, sampler=train_sampler, **loader_kwargs)
+    else:
+        train_loader = DataLoader(train_ds, shuffle=True, **loader_kwargs)
     val_loader = DataLoader(val_ds, shuffle=False, **loader_kwargs)
 
     activation_checkpointing = bool(train_cfg["activation_checkpointing"])
