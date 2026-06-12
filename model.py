@@ -208,11 +208,37 @@ class DinoV2ViT(nn.Module):
             "x_norm_patchtokens": x[:, 1 + self.registers :],
         }
 
+    # Collect patch tokens from the last `n` transformer blocks (DINOv2's
+    # get_intermediate_layers dense recipe). Each block's output is passed through the
+    # shared final LayerNorm and the patch tokens are concatenated along the channel dim.
+    # Returns (B, n_patches, n*dim) of multi-layer patch features. This is read ONLY by
+    # the segmentation probe via encode_image; training/forward() and the CLS-token
+    # classification probes are untouched, so it cannot perturb any non-seg probe.
+    @torch.no_grad()
+    def _intermediate_patch_tokens(self, x, n=4):
+        x = self._prepare_tokens(x)
+        depth = len(self.blocks)
+        take = set(range(depth - n, depth))
+        layers = []
+        for i, blk in enumerate(self.blocks):
+            x = blk(x)
+            if i in take:
+                layers.append(self.norm(x)[:, 1 + self.registers:])
+        return torch.cat(layers, dim=-1)
+
     # Probe contract: encode_image returns [registers || patches] for the seg head;
     # probe_features returns the cls token for classification probes.
+    # Decode geometry: hand the seg head multi-layer (last-4) patch tokens instead of
+    # only the final CLS-optimized layer. The probe slices `[:, registers:]`, so the
+    # leading register slots are discarded — we keep the same register count as padding
+    # and place the richer multi-layer patch features after it. Patch-token COUNT is
+    # unchanged (the head infers grid size from it); only the channel dim widens, and
+    # the head's d_encoder adapts to feats.shape[-1] automatically.
     def encode_image(self, x, checkpoint=False):
-        out = self(x, checkpoint=checkpoint)
-        return torch.cat([out["x_norm_regtokens"], out["x_norm_patchtokens"]], dim=1)
+        patches = self._intermediate_patch_tokens(x, n=4)
+        b, _, d = patches.shape
+        reg_pad = patches.new_zeros(b, self.registers, d)
+        return torch.cat([reg_pad, patches], dim=1)
 
     def probe_features(self, x):
         return self(x)["x_norm_clstoken"]
