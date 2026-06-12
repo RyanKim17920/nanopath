@@ -14,7 +14,7 @@ data:
   mean: [0.485, 0.456, 0.406]
   std: [0.229, 0.224, 0.225]
   global_crop_scale: [0.2, 1.0]
-  local_crop_scale: [0.03, 0.25]
+  local_crop_scale: [0.05, 0.25]
   color_jitter: 0.45
   color_jitter_saturation: 0.4
   hed_jitter: 0.12
@@ -27,7 +27,7 @@ train:
   seed: 1337
   bf16: true
   activation_checkpointing: false
-  batch_size: 192 # raised 128->192 to fill GPU (256 OOMs the 80GB H100)
+  batch_size: 128 # lowered 192->128: global_views 2->4 doubles full-res global-crop memory; 192 OOMs the 80GB H100 with 4 globals
   num_workers: 16
   prefetch_factor: 2
   persistent_workers: true
@@ -39,8 +39,8 @@ train:
   save_every: null
   eval_every: 50
   val_batches: 4
-  global_views: 2
-  local_views: 8
+  global_views: 4
+  local_views: 4
   global_size: 224
   local_size: 98
   resume: null # optional explicit checkpoint path; null means always start fresh and wipe output_dir

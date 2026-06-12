@@ -458,18 +458,26 @@ def main():
     # Compute (dino_loss, ibot_loss, kde, diag) for one batch of (gf, lf) crops with the given masks +
     # schedule values. Used by both the train step and evaluate() (no_grad).
     def compute_losses(gf, lf, b, masks, mask_idx, mask_w, t_temp, k_scale, ckpt=False, log_diag=False):
+        G = train_cfg["global_views"]
         with torch.no_grad():
             t = teacher_backbone(gf)
-            t_cls = teacher_dino_head(t["x_norm_clstoken"]).chunk(train_cfg["global_views"])
-            t_prob = sinkhorn(torch.cat((t_cls[1], t_cls[0])), t_temp).view(2, b, -1)
+            # Teacher CLS targets for the G global views, sinkhorn-centred jointly over
+            # all G*b rows, then reshaped to (G, b, K). t_prob[j] is the target for global j.
+            t_prob = sinkhorn(teacher_dino_head(t["x_norm_clstoken"]), t_temp).view(G, b, -1)
             if not jepa:
                 t_patch_prob = sinkhorn(teacher_ibot_head(t["x_norm_patchtokens"].flatten(0, 1)[mask_idx]), t_temp)
         sg = student_backbone(gf, masks=masks, checkpoint=ckpt, log_diagnostics=log_diag)
         sl = student_backbone(lf, checkpoint=ckpt)
         sg_cls, sl_cls = student_dino_head(sg["x_norm_clstoken"]), student_dino_head(sl["x_norm_clstoken"])
         L = train_cfg["local_views"]
-        local_loss = sum(dino_ce(x, y) for x in sl_cls.chunk(L) for y in t_prob) / (2 * L + 2)
-        global_loss = dino_ce(sg_cls, t_prob.flatten(0, 1)) * 2 / (2 * L + 2)
+        # DINO multi-crop CE, generalised to G global views. Each local CLS predicts
+        # every global teacher target (L*G pairs); each student global i predicts every
+        # OTHER global teacher target j!=i (G*(G-1) cross pairs). Normalise by the pair count.
+        n_pairs = L * G + G * (G - 1)
+        local_loss = sum(dino_ce(x, y) for x in sl_cls.chunk(L) for y in t_prob) / n_pairs
+        sg_chunks = sg_cls.chunk(G)
+        global_loss = sum(dino_ce(sg_chunks[i], t_prob[j])
+                          for i in range(G) for j in range(G) if i != j) / n_pairs
         if jepa:
             target = F.layer_norm(t["x_norm_patchtokens"].flatten(0, 1), (student_backbone.embed_dim,))[mask_idx]
             pred = student_predictor(sg["x_norm_patchtokens"]).flatten(0, 1)[mask_idx]
