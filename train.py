@@ -614,7 +614,13 @@ def main():
             else:
                 lr = cosine_schedule(dino_cfg["lr"], dino_cfg["lr_min"], (frac - warmup_fraction) / max(1e-9, 1 - warmup_fraction))
             wd = cosine_schedule(0.04, 0.2, frac)
-            teacher_temp = 0.04 + min(1.0, frac / 0.2727) * (0.07 - 0.04)
+            # Early anti-collapse warmup softens the teacher CLS target 0.04->0.07 over the first
+            # 27% of training; then cosine-sharpen it back 0.07->0.04 over the remaining bulk to
+            # tighten the sinkhorn class-prototype assignment for CLS-pooled probes (survival/mutation/16shot).
+            if frac < 0.2727:
+                teacher_temp = 0.04 + (frac / 0.2727) * (0.07 - 0.04)
+            else:
+                teacher_temp = cosine_schedule(0.07, 0.04, (frac - 0.2727) / (1.0 - 0.2727))
             last_layer_lr = 0.0 if frac < dino_cfg["freeze_last_layer_fraction"] else lr
             for group in opt.param_groups:
                 base_lr = last_layer_lr if group["last_layer"] else lr
