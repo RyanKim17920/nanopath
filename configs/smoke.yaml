@@ -59,6 +59,8 @@ dino:
   clip_grad: 3.0
   kde_loss_weight: 0.002
   kde_concentration: 10.0
+  cls_cov_weight: 0.02
+  cls_cov_var_gamma: 1.0
 
 probe:
   enabled: true

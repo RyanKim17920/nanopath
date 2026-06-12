@@ -162,6 +162,25 @@ def kde_loss(x, concentration):
     return torch.logsumexp(sim, dim=1).mean() - math.log(max(1, sim.shape[1] - 1))
 
 
+# VICReg-style covariance-isotropy loss on the (un-normalised) pre-head CLS embedding.
+# Unlike kde_loss (angular hypersphere repulsion), this targets the FEATURE COVARIANCE of the
+# global CLS embedding: a variance hinge keeps every dimension's std >= 1 (anti per-dim collapse)
+# and an off-diagonal covariance penalty decorrelates the dimensions (anti anisotropy). This is the
+# geometry that z-scored case-pooled CoxPH survival reads. CLS-only, gradient flows to the trunk.
+def cls_cov_loss(x, var_gamma=1.0, eps=1e-4):
+    x = x.float()
+    n, d = x.shape
+    if n < 2:
+        return x.sum() * 0.0
+    x = x - x.mean(dim=0, keepdim=True)
+    std = torch.sqrt(x.var(dim=0, unbiased=False) + eps)
+    var_term = F.relu(var_gamma - std).mean()
+    cov = (x.T @ x) / (n - 1)
+    off_diag_sq = cov.pow(2).sum() - cov.diagonal().pow(2).sum()
+    cov_term = off_diag_sq / d
+    return var_term + cov_term
+
+
 # Sample iBOT masking pattern: per-image bernoulli on whether to mask, then random patch ratio.
 def make_masks(batch, patches, device, mask_prob=0.5):
     masks = torch.zeros(batch, patches, dtype=torch.bool, device=device)
@@ -478,6 +497,12 @@ def main():
             s_patch = student_ibot_head(sg["x_norm_patchtokens"].flatten(0, 1)[mask_idx])
             ibot_loss = float(dino_cfg.get("ibot_loss_weight", 1.0)) * -(t_patch_prob * F.log_softmax(s_patch / 0.1, dim=-1)).sum(-1).mul(mask_w).sum() / max(1, b * 2)
         kde = dino_cfg["kde_loss_weight"] * k_scale * sum(kde_loss(x, dino_cfg["kde_concentration"]) for x in sg["x_norm_clstoken"].chunk(train_cfg["global_views"]))
+        cls_cov_weight = float(dino_cfg.get("cls_cov_weight", 0.0))
+        if cls_cov_weight > 0.0:
+            cls_cov_var_gamma = float(dino_cfg.get("cls_cov_var_gamma", 1.0))
+            kde = kde + cls_cov_weight * k_scale * sum(
+                cls_cov_loss(x, cls_cov_var_gamma) for x in sg["x_norm_clstoken"].chunk(train_cfg["global_views"])
+            )
         diag = None
         if log_diag:
             diag = {

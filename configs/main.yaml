@@ -59,6 +59,11 @@ dino:
   clip_grad: 3.0
   kde_loss_weight: 0.005
   kde_concentration: 10.0
+  # VICReg-style covariance-isotropy regularizer on the pre-head global CLS embedding
+  # (variance hinge + off-diagonal decorrelation). Targets CLS feature-covariance anisotropy/collapse
+  # that z-scored CoxPH survival reads. CLS-only, gradient flows to trunk, shares the kde flop-warmup.
+  cls_cov_weight: 0.02
+  cls_cov_var_gamma: 1.0
 
 probe:
   enabled: true
