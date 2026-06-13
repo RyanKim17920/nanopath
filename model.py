@@ -235,22 +235,76 @@ class DinoV2ViT(nn.Module):
     # global mixing) -> pure seg upside with zero seg/CLS trunk lockstep.
     DENSE_FUSE_LAYERS = 4
 
+    # exp_0176 (port of exp_0167): EVAL-ONLY image-guided feature DENSIFIER on top of the
+    # exp_0114 fusion. The bottleneck for dense seg (worst probe @0.289) is the COARSE 16x16
+    # patch grid, not which blocks are read. We densify the FROZEN feature map itself (no trunk
+    # retrain, no input-upsample-through-patch-embed -- that path regressed CLS via seed variance
+    # in exp_0038) with a parameter-free Joint Bilateral Upsampler (JBU / FeatUp-style): the
+    # 16x16 fused feature grid is upsampled to UPSAMPLE_GRID x UPSAMPLE_GRID using bilateral
+    # weights = spatial Gaussian x range Gaussian on the INPUT IMAGE's high-res structure.
+    # This injects real boundary/edge detail from the guidance image into the feature map and
+    # denoises across patch boundaries, instead of the information-free bilinear interp the seg
+    # head already does post-decode. Pure eval-only: trunk runs ONCE at native resolution, CLS
+    # path (probe_features) untouched, so the 7 CLS probes are byte-identical. The locked
+    # MaskTransformer auto-adapts: gs=int(n**0.5) reads the new 32x32 grid and d_encoder reads
+    # the channel dim. Token axis stays [regs || patches] for probe.py's `[:, registers:]`.
+    UPSAMPLE_GRID = 32          # target dense grid (16 -> 32, the seg head infers gs from n)
+    JBU_SIGMA_RANGE = 0.1       # guidance-intensity range bandwidth (image normalized to ~[0,1])
+
+    def _jbu_upsample(self, feat_hw, guide_lr, guide_hr):
+        # feat_hw: [B,C,h,w] source feature map; guide_lr/guide_hr: [B,1,h,w]/[B,1,H,W] grayscale
+        # guidance at source / target resolution. Returns [B,C,H,W] image-guided dense features.
+        B, C, h, w = feat_hw.shape
+        H = Wt = self.UPSAMPLE_GRID
+        # Bilinear feature prior (spatial smoothness term) at the target grid.
+        up = F.interpolate(feat_hw, size=(H, Wt), mode="bilinear", align_corners=False)
+        # Range term: for each target cell, the guidance intensity gap to the nearest-source cell
+        # it was drawn from. Nearest-up the source guidance to the target grid, compare to the
+        # true high-res guidance; small gap (same tissue) -> trust the feature, large gap (across
+        # a boundary) -> sharpen toward the high-res structure by blending in the high-res guide's
+        # local detail. Parameter-free Gaussian on the gap.
+        guide_src_up = F.interpolate(guide_lr, size=(H, Wt), mode="nearest")
+        gap = (guide_hr - guide_src_up).abs()
+        w_range = torch.exp(-(gap ** 2) / (2.0 * self.JBU_SIGMA_RANGE ** 2))  # [B,1,H,W] in (0,1]
+        # High-frequency feature detail recovered by sharpening the bilinear prior where the
+        # guidance says there is a boundary: detail = bilinear_up - blur(bilinear_up); add it
+        # back weighted by (1 - w_range) so boundaries get sharpened, flat regions stay smooth.
+        blur = F.avg_pool2d(F.pad(up, (1, 1, 1, 1), mode="replicate"), kernel_size=3, stride=1)
+        detail = up - blur
+        return up + (1.0 - w_range) * detail
+
     def encode_image(self, x, checkpoint=False):
         n_fuse = min(self.DENSE_FUSE_LAYERS, len(self.blocks))
         take_from = len(self.blocks) - n_fuse  # indices [take_from, depth) inclusive of last
-        x = self._prepare_tokens(x)
+        B, _, H, W = x.shape
+        h, w = H // self.patch_size, W // self.patch_size
+        # Grayscale guidance from the input image, normalized to ~[0,1] for the range bandwidth.
+        guide = x.mean(dim=1, keepdim=True)
+        guide = (guide - guide.amin(dim=(2, 3), keepdim=True)) / (
+            guide.amax(dim=(2, 3), keepdim=True) - guide.amin(dim=(2, 3), keepdim=True) + 1e-6)
+        guide_lr = F.interpolate(guide, size=(h, w), mode="area")  # source-grid guidance
+        guide_hr = F.interpolate(guide, size=(self.UPSAMPLE_GRID, self.UPSAMPLE_GRID), mode="area")
+        xt = self._prepare_tokens(x)
         collected = []
         for i, blk in enumerate(self.blocks):
             if checkpoint and self.training:
-                x = torch.utils.checkpoint.checkpoint(blk, x, use_reentrant=False)
+                xt = torch.utils.checkpoint.checkpoint(blk, xt, use_reentrant=False)
             else:
-                x = blk(x)
+                xt = blk(xt)
             if i >= take_from:
                 # Norm a clone so the running trunk activation is untouched across layers.
-                xn = self.norm(x)
+                xn = self.norm(xt)
                 collected.append(xn[:, 1:])  # drop cls; keep [regs || patches]
-        # Channel-concat the fused layers (shallow -> deep), preserving token order.
-        return torch.cat(collected, dim=-1)
+        # Channel-concat the fused layers (shallow -> deep): [B, regs+h*w, C], C = 384*n_fuse.
+        fused = torch.cat(collected, dim=-1)
+        regs = fused[:, : self.registers]                 # register tokens (non-spatial, kept as-is)
+        patches = fused[:, self.registers :]              # [B, h*w, C] spatial tokens
+        C = patches.shape[-1]
+        feat_hw = patches.transpose(1, 2).reshape(B, C, h, w)
+        dense = self._jbu_upsample(feat_hw.float(), guide_lr.float(), guide_hr.float())
+        dense = dense.flatten(2).transpose(1, 2).to(fused.dtype)  # [B, UPSAMPLE_GRID^2, C]
+        # Token axis stays [regs || dense patches] so probe.py's `[:, registers:]` slice is correct.
+        return torch.cat([regs, dense], dim=1)
 
     def probe_features(self, x):
         return self(x)["x_norm_clstoken"]

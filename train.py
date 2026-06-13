@@ -310,7 +310,13 @@ def main():
         examples_seen = int(checkpoint["examples_seen"])
         visible_patch_presentations = int(checkpoint["visible_patch_presentations"])
         train_flops = int(checkpoint["train_flops"])
-        wandb_meta = dict(checkpoint["wandb"])
+        # exp_0176 re-probe: when resuming a FINISHED parent checkpoint to re-evaluate it under
+        # a new EVAL-ONLY readout (examples_seen already == max_train_samples, so the train loop
+        # never enters), start a FRESH wandb run identity instead of resuming the parent's run --
+        # otherwise summary.json carries the PARENT's wandb id/name, which is the stale-summary
+        # false-commit signature. Logging-only; weights restored above are untouched.
+        if not bool(train_cfg.get("reprobe_only", False)):
+            wandb_meta = dict(checkpoint["wandb"])
     wandb_init = {
         "project": "nanopath",
         "name": wandb_name,
@@ -588,12 +594,55 @@ def main():
         except Exception as exc:
             print(f"{console_prefix()} log_main_outcomes skipped: {exc}", flush=True)
 
+    # --- Probe co-location OOM guard (score-neutral infra) -------------------------------
+    # probe.py (LOCKED) launches probe.py as a SEPARATE process via subprocess.run(check=True)
+    # while THIS trainer still pins every backbone/head/predictor + the AdamW state on the GPU.
+    # That co-location is the recurrent step_0007812 SIGKILL:9 OOM (NOT a hang -- a wall-clock
+    # timeout alone does not fix it, cf. exp_0147). Before each probe subprocess we EVICT all
+    # GPU-resident trainer state to CPU + empty_cache so the probe child has the full 80GB; after
+    # it returns we restore to GPU. We also tolerate an external SIGKILL/negative returncode
+    # (probe.py uses check=True, so a killed probe raises CalledProcessError) so a dead probe
+    # records a failed/missing result instead of crashing the whole run. This is NOT a
+    # killpg/pkill/process-group SIGKILL guard (that one nukes HEALTHY probes, harness-bug-1).
+    _gpu_modules = [student_backbone, teacher_backbone, student_dino_head, teacher_dino_head,
+                    student_predictor, *predictors.values()]
+
+    def _move_optimizer_state(opt_obj, dev):
+        for st in opt_obj.state.values():
+            for k, v in st.items():
+                if torch.is_tensor(v):
+                    st[k] = v.to(dev)
+
+    def _evict_trainer_to_cpu():
+        for m in _gpu_modules:
+            m.to("cpu")
+        for f in list(protos.keys()):
+            protos[f] = protos[f].to("cpu")
+        _move_optimizer_state(opt, "cpu")
+        torch.cuda.empty_cache()
+
+    def _restore_trainer_to_gpu():
+        for m in _gpu_modules:
+            m.to(device)
+        for f in list(protos.keys()):
+            protos[f] = protos[f].to(device)
+        _move_optimizer_state(opt, device)
+
     # Queue a probe at `checkpoint_step` for the given sample target; no-op if already done.
     def run_probe_at(checkpoint_step, target_samples):
         if probe_state is None or (probe_state["paths"]["results_dir"] / f"step_{checkpoint_step:07d}.json").exists():
             log_probe_results()
             return
-        queue_probe_job(probe_state, checkpoint_payload(checkpoint_step, full=False), checkpoint_step, train_flops, min(1.0, target_samples / max_train_samples))
+        payload = checkpoint_payload(checkpoint_step, full=False)
+        _evict_trainer_to_cpu()
+        try:
+            queue_probe_job(probe_state, payload, checkpoint_step, train_flops, min(1.0, target_samples / max_train_samples))
+        except subprocess.CalledProcessError as exc:
+            # External SIGKILL (returncode -9 on OOM) or probe non-zero exit: record + continue,
+            # don't take the whole run down. The harvester's metrics-stall check is the hang guard.
+            print(f"{console_prefix()} Probe  [{checkpoint_step}]  FAILED rc={exc.returncode}; continuing without this probe.", flush=True)
+        finally:
+            _restore_trainer_to_gpu()
         log_probe_results()
 
     # Queue the furthest crossed sample milestone so delayed probes do not run on stale checkpoints.
