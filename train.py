@@ -549,13 +549,13 @@ def main():
             headline = {
                 "main-outcomes/linear": "linear_mean_f1",
                 "main-outcomes/knn": "knn_mean_f1",
-                "main-outcomes/16shot": "fewshot_mean_f1",
+                "main-outcomes/16-shot": "fewshot_mean_f1",
                 "main-outcomes/segmentation": "seg_mean_jaccard",
                 "main-outcomes/progression": "slide_mean_auc",
                 "main-outcomes/mutation": "auc_mean",
                 "main-outcomes/survival": "survival_mean_cindex",
                 "main-outcomes/robustness": "robustness_mean",
-                "main-outcomes/mean_score": "mean_probe_score",
+                "main-outcomes/mean": "mean_probe_score",
             }
             mean_keys = set(headline.values())
             payload = {panel: float(metrics[src]) for panel, src in headline.items() if src in metrics}
