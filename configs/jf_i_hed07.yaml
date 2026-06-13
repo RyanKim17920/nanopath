@@ -66,6 +66,16 @@ dino:
   jepa_blocks: 4
   jepa_block_scale: 0.1
   freeze_backbone_fraction: 0.0
+  # ---- Post-hoc power-EMA snapshot averaging (exp_0145) -------------------------------
+  # SNAPSHOT-ONLY: does NOT change the training-time teacher EMA momentum (cosine 0.994->1.0).
+  # During training keep CPU copies of the teacher (model_ema) backbone at each validation
+  # step, tagged with that step's val_dino; after the loop build a post-hoc weighted average
+  # over those snapshots and pick the averaging horizon DATA-DRIVEN by minimizing held-out
+  # val_dino, then probe THAT averaged encoder (best-of-trajectory vs the final step).
+  posthoc_ema: true
+  posthoc_ema_max_snapshots: 48
+  posthoc_ema_gammas: [0.0, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
+  posthoc_ema_min_end_frac: 0.25
 probe:
   enabled: true
   model_weights: ema
