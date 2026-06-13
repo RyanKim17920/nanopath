@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections import deque
 from copy import deepcopy
 from pathlib import Path
 
@@ -404,6 +405,19 @@ def main():
     # cpu_state(m) materializes an on-CPU copy of a module's state_dict for torch.save.
     def cpu_state(m): return {k: v.detach().cpu().clone() for k, v in m.state_dict().items()}
 
+    # ---- Post-hoc power-EMA snapshot store (exp_0145) ----------------------------------
+    # SNAPSHOT-ONLY: we copy the teacher (model_ema) backbone weights at each validation step
+    # into a CPU-resident ring buffer, tagged with that step's val_dino + sample-fraction. This
+    # observes the EMA trajectory; it does NOT alter update_ema / the training momentum schedule.
+    # The post-hoc solve (after the loop) selects the averaging horizon that minimizes val_dino.
+    posthoc_ema_on = bool(dino_cfg.get("posthoc_ema", False))
+    posthoc_snaps = deque(maxlen=int(dino_cfg.get("posthoc_ema_max_snapshots", 48)))  # [(sfrac, val_dino, cpu_state_dict)]
+
+    def capture_posthoc_snapshot(snap_sfrac, snap_val_dino):
+        if not posthoc_ema_on:
+            return
+        posthoc_snaps.append((float(snap_sfrac), float(snap_val_dino), cpu_state(teacher_backbone)))
+
     # Full checkpoint (latest.pt) covers explicit train.resume whereas probe checkpoint is a slim
     # weights-only ckpt, given probe.py does not need optimizer or projection heads.
     def checkpoint_payload(next_step, full):
@@ -790,6 +804,10 @@ def main():
                     handle.write(json.dumps(val_log) + "\n")
                 wandb_run.log({_panel(f"val_{k}"): v for k, v in val.items()}, step=completed_step)
                 print(f"{console_prefix()} Validation  [{completed_step}]  total: {val['total']:.4f}  dino: {val['dino']:.4f}  jepa: {val['jepa']:.4f}  kde: {val['kde']:.4f}", flush=True)
+                # exp_0145: snapshot the current teacher (model_ema) tagged with this step's
+                # held-out val_dino. The training-time EMA momentum is untouched; this only
+                # records the trajectory for the post-hoc averaging-horizon solve after the loop.
+                capture_posthoc_snapshot(sfrac, val["dino"])
             step = completed_step
             data_wait_started_at = time.monotonic()
             if train_flops >= max_train_flops or examples_seen + batch_size > max_train_samples:
@@ -803,6 +821,72 @@ def main():
             if train_loader._iterator is not None:
                 train_loader._iterator._shutdown_workers()
                 train_loader._iterator = None
+        # ---- Post-hoc power-EMA averaging-horizon solve (exp_0145) ----------------------
+        # The val_dino late-rise means the best encoder lives BEFORE the final step at an
+        # unknown per-run location. We have CPU snapshots of the teacher (model_ema) at every
+        # validation step, each tagged with its held-out val_dino. Build candidate averages by
+        # power-EMA weighting w_i ~ t_i^gamma over the suffix [end's earliest .. end_t], sweep
+        # (gamma, end_t), score each candidate's val_dino on the held-out set, and load the
+        # MINIMIZER into teacher_backbone so the final probe + saved checkpoint use it. This is
+        # a pure post-hoc snapshot solve: NO retraining per width, training-time EMA momentum
+        # unchanged. Distinct from a fixed-window uniform LAWA mean -- the profile/width here is
+        # tuned post-hoc against the validation signal.
+        if posthoc_ema_on and len(posthoc_snaps) >= 2:
+            snaps = list(posthoc_snaps)  # [(sfrac, val_dino, state_dict)] ascending in sfrac
+            sfracs = [s for s, _, _ in snaps]
+            ref_state = cpu_state(teacher_backbone)  # final teacher = parent behaviour, the fallback
+            keys = list(ref_state.keys())
+            gammas = [float(g) for g in dino_cfg.get("posthoc_ema_gammas", [0.0, 1.0, 2.0, 4.0, 8.0])]
+            min_end_frac = float(dino_cfg.get("posthoc_ema_min_end_frac", 0.25))
+            # Candidate truncation end-points: each snapshot at/after min_end_frac (lets the
+            # averaged encoder stop before the final step) plus always the final snapshot.
+            end_idxs = sorted({i for i, s in enumerate(sfracs) if s >= min_end_frac} | {len(snaps) - 1})
+
+            def averaged_state(end_i, gamma):
+                # Power-EMA over the suffix [j0 .. end_i] where j0 is the first kept snapshot at/after
+                # min_end_frac (or 0 if none); weights normalised t_i^gamma, t_i rescaled to (0,1] over
+                # the window so gamma's effect is window-relative (gamma=0 => uniform LAWA mean).
+                lo = next((i for i, s in enumerate(sfracs) if s >= min_end_frac), 0)
+                idxs = list(range(lo, end_i + 1)) or [end_i]
+                t = [sfracs[i] for i in idxs]
+                t0, t1 = t[0], t[-1]
+                rel = [((ti - t0) / (t1 - t0) if t1 > t0 else 1.0) for ti in t]  # (0,1]
+                w = [max(1e-12, r) ** gamma for r in rel]
+                sw = sum(w)
+                w = [wi / sw for wi in w]
+                out = {}
+                for k in keys:
+                    acc = None
+                    for wi, i in zip(w, idxs):
+                        v = snaps[i][2][k].to(torch.float64)
+                        acc = v * wi if acc is None else acc + v * wi
+                    out[k] = acc.to(ref_state[k].dtype)
+                return out
+
+            best = None  # (val_dino, end_frac, gamma, state)
+            for end_i in end_idxs:
+                for gamma in gammas:
+                    cand = averaged_state(end_i, gamma)
+                    teacher_backbone.load_state_dict(cand, strict=True)
+                    cand_val = evaluate(step, teacher_temp, kde_scale)["dino"]
+                    print(f"{console_prefix()} PosthocEMA  end_frac={sfracs[end_i]:.3f} gamma={gamma:.2f}  val_dino={cand_val:.5f}", flush=True)
+                    if best is None or cand_val < best[0]:
+                        best = (cand_val, sfracs[end_i], gamma, cand)
+            final_val_dino = snaps[-1][1]  # last snapshot = final-step teacher (parent's encoder)
+            if best is not None:
+                teacher_backbone.load_state_dict(best[3], strict=True)
+                posthoc_log = {"step": step, "posthoc_ema/selected_val_dino": best[0],
+                               "posthoc_ema/selected_end_frac": best[1], "posthoc_ema/selected_gamma": best[2],
+                               "posthoc_ema/final_step_val_dino": float(final_val_dino),
+                               "posthoc_ema/n_snapshots": len(snaps)}
+                with metrics_path.open("a") as handle:
+                    handle.write(json.dumps(posthoc_log) + "\n")
+                wandb_run.log({(k if k == "step" else _panel(k)): v for k, v in posthoc_log.items() if k != "step"}, step=step)
+                print(f"{console_prefix()} PosthocEMA  SELECTED end_frac={best[1]:.3f} gamma={best[2]:.2f}  "
+                      f"val_dino={best[0]:.5f} (final-step {final_val_dino:.5f})", flush=True)
+            del ref_state
+            posthoc_snaps.clear()
+            torch.cuda.empty_cache()
         # Probes get their own short-lived checkpoint via run_probe_at; only persist latest.pt
         # at end-of-run when periodic saving is on (save_every set) so smoke runs leave nothing.
         if save_checkpoints and step != last_saved_step:
