@@ -34,6 +34,7 @@ train:
   max_train_samples: 1000000 # tile presentations; global/local crops still count as one sample
   max_train_flops: 1000000000000000000 # 1.0e18, the leaderboard FLOP budget
   log_every: 20
+  log_diagnostics_every: 100
   save_every: 1000
   # Validation pass every `eval_every` steps over `val_batches` held-out batches
   eval_every: 200

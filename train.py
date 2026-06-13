@@ -275,7 +275,9 @@ def main():
     train_flops = 0
     output_dir = Path(cfg["project"]["output_dir"])
     wandb_dir = Path(cfg["project"]["wandb_dir"])
-    wandb_name = cfg["project"]["name"]
+    # Make the run identity legible (output_dir basename = evo exp id or the run's own name),
+    # so wandb runs are distinguishable instead of all sharing the static project name.
+    wandb_name = f"{cfg['project']['name']}-{output_dir.name}"
     if labless_autosubmit_file:
         wandb_name = json.loads(Path(labless_autosubmit_file).read_text()).get("run_name") or wandb_name
     slurm_job_id = os.environ.get("SLURM_JOB_ID")
@@ -439,12 +441,12 @@ def main():
 
     # Compute (dino_loss, jepa_loss, kde) for one batch of (gf, lf) crops with the given masks +
     # schedule values. Used by both the train step and evaluate() (no_grad).
-    def compute_losses(gf, lf, b, masks, mask_idx, mask_w, t_temp, k_scale, ckpt=False, meta=None, cond=None):
+    def compute_losses(gf, lf, b, masks, mask_idx, mask_w, t_temp, k_scale, ckpt=False, meta=None, cond=None, log_diag=False):
         with torch.no_grad():
             t = teacher_backbone(gf)
             t_cls = teacher_dino_head(t["x_norm_clstoken"]).chunk(train_cfg["global_views"])
             t_prob = sinkhorn(torch.cat((t_cls[1], t_cls[0])), t_temp).view(2, b, -1)
-        sg = student_backbone(gf, masks=masks, checkpoint=ckpt)
+        sg = student_backbone(gf, masks=masks, checkpoint=ckpt, log_diagnostics=log_diag)
         sl = student_backbone(lf, checkpoint=ckpt)
         sg_cls, sl_cls = student_dino_head(sg["x_norm_clstoken"]), student_dino_head(sl["x_norm_clstoken"])
         L = train_cfg["local_views"]
@@ -495,7 +497,15 @@ def main():
                     meta_loss = sum((nbar / grad_eq_ema[f]).detach() * L for f, L in terms)
                 else:
                     for _, L in terms: meta_loss = meta_loss + L
-        return local_loss + global_loss, jepa_loss, kde, meta_loss
+        diag = None
+        if log_diag:
+            diag = {
+                "layers": sg.get("_diagnostics"),
+                "final_cls": sg.get("_final_norm_cls"),
+                "final_reg": sg.get("_final_norm_reg"),
+                "final_patch": sg.get("_final_norm_patch"),
+            }
+        return local_loss + global_loss, jepa_loss, kde, meta_loss, diag
 
     # Held-out validation pass: same DINO + JEPA + KDE losses on `val_batches` of the val split.
     # Schedule terms (teacher_temp, kde_scale) drift over training, so read val curves as same-step
@@ -516,7 +526,7 @@ def main():
             with torch.no_grad(), autocast:
                 gf, lf = vg.transpose(0, 1).flatten(0, 1), vl.transpose(0, 1).flatten(0, 1)
                 masks, mask_idx, mask_w = make_block_mask(b * train_cfg["global_views"], global_grid, device, n_blocks=int(dino_cfg["jepa_blocks"]), block_scale=float(dino_cfg["jepa_block_scale"]))
-                dino_l, jepa_l, kde_v, _ = compute_losses(gf, lf, b, masks, mask_idx, mask_w, eval_teacher_temp, eval_kde_scale)
+                dino_l, jepa_l, kde_v, _, _ = compute_losses(gf, lf, b, masks, mask_idx, mask_w, eval_teacher_temp, eval_kde_scale)
             sums += torch.tensor([float(dino_l), float(jepa_l), float(kde_v), float(dino_l + jepa_l + kde_v)], device=device)
             n_batches += 1
         random.setstate(py_rng)
@@ -549,6 +559,7 @@ def main():
 
     log_probe_results()
     max_train_flops = int(train_cfg["max_train_flops"])
+    diag_every = int(train_cfg.get("log_diagnostics_every", 0) or 0)
     warmup_train_samples = math.ceil(max_train_samples * dino_cfg["warmup_fraction"])
     # Probe targets are sample milestones: one tile counts once even with many global/local crops.
     probe_count = int(cfg["probe"]["count"]) if probe_enabled(cfg) else 0
@@ -572,6 +583,21 @@ def main():
     # 1e18 leaderboard cap reflects real GPU work.
     measured_flops_per_step = None
 
+    # Wandb groups panels by the prefix before the first "/". Route losses + grad/lr + val
+    # losses into main-train-results/, everything else (non-diag, non-probe) into
+    # train-tracking/. diag/ and probe/ keys keep their existing prefix. metrics.jsonl stays
+    # unprefixed. Note: on this FINO lineage the JEPA loss is carried by the "jepa" key
+    # (main's "ibot"); both are listed so the routing matches main regardless of lineage.
+    _MAIN_KEYS = {"dino", "ibot", "jepa", "kde", "total", "grad_norm", "lr",
+                  "val_dino", "val_ibot", "val_jepa", "val_kde", "val_total"}
+
+    def _panel(k):
+        if k.startswith("diag/"):
+            return k
+        if k in _MAIN_KEYS:
+            return f"main-train-results/{k}"
+        return f"train-tracking/{k}"
+
     while examples_seen + batch_size <= max_train_samples and train_flops < max_train_flops:
         for batch in train_loader:
             if examples_seen + batch_size > max_train_samples or train_flops >= max_train_flops:
@@ -583,6 +609,7 @@ def main():
             student_predictor.train()
             completed_step = step + 1
             should_log = completed_step == 1 or completed_step % train_cfg["log_every"] == 0
+            should_diag = diag_every > 0 and should_log and completed_step % diag_every == 0
             # Data identifiers stay on CPU and feed coverage metrics; image tensors move below.
             for key, batch_key in (("sample", "sample_idx"), ("slide", "slide_id"), ("patient", "patient_id")):
                 pending_ids[key].update(int(x) for x in batch[batch_key].tolist())
@@ -627,9 +654,10 @@ def main():
                              batch["meta_disc"].to(device, non_blocking=True),
                              {f: batch["mc_" + f].to(device, non_blocking=True) for f, _ in fino_cont}) if fino_cfg else None)
                     cond = batch["meta_disc"][:, cond_col].repeat(train_cfg["global_views"]).to(device, non_blocking=True) if jepa_cond else None
-                    dino_loss_value, jepa_loss, kde, meta_loss = compute_losses(
+                    dino_loss_value, jepa_loss, kde, meta_loss, diag = compute_losses(
                         gf, lf, batch_size, masks, mask_idx, mask_w, teacher_temp, kde_scale,
                         ckpt=activation_checkpointing, meta=meta, cond=cond,
+                        log_diag=should_diag,
                     )
                     total_loss = dino_loss_value + jepa_loss + kde + meta_loss
                 opt.zero_grad(set_to_none=True)
@@ -711,6 +739,23 @@ def main():
                     "grad_norm": float(grad_norm.detach()),
                 }
                 train_log.update(unique_counts)
+                if diag is not None:
+                    layer_diags = diag.get("layers") or []
+                    if layer_diags:
+                        stride = max(1, len(layer_diags) // 4)
+                        sampled_indices = list(range(0, len(layer_diags), stride))
+                        for idx in sampled_indices:
+                            for k, v in layer_diags[idx].items():
+                                train_log[f"diag/{k}/L{idx}"] = v
+                        all_vals = {}
+                        for layer_d in layer_diags:
+                            for k, v in layer_d.items():
+                                all_vals.setdefault(k, []).append(v)
+                        for k, vals in all_vals.items():
+                            train_log[f"diag/{k}/mean"] = sum(vals) / len(vals)
+                    for key in ("final_cls", "final_reg", "final_patch"):
+                        if diag.get(key) is not None:
+                            train_log[f"diag/{key}"] = diag[key]
                 print(
                     f"{console_prefix()} Training  "
                     f"[{completed_step}/{total_steps_estimate}]  eta: {eta_string}  gap: {console_gap_ms:.2f} ms  "
@@ -726,7 +771,7 @@ def main():
                 with metrics_path.open("a") as handle:
                     handle.write(json.dumps(train_log) + "\n")
                 wandb_run.log(
-                    {f"train/{key}": value for key, value in train_log.items() if key != "step"},
+                    {_panel(key): value for key, value in train_log.items() if key != "step"},
                     step=completed_step,
                 )
                 log_probe_results()
@@ -743,7 +788,7 @@ def main():
                 val_log = {"step": completed_step, **{f"val_{k}": v for k, v in val.items()}}
                 with metrics_path.open("a") as handle:
                     handle.write(json.dumps(val_log) + "\n")
-                wandb_run.log({f"val/{k}": v for k, v in val.items()}, step=completed_step)
+                wandb_run.log({_panel(f"val_{k}"): v for k, v in val.items()}, step=completed_step)
                 print(f"{console_prefix()} Validation  [{completed_step}]  total: {val['total']:.4f}  dino: {val['dino']:.4f}  jepa: {val['jepa']:.4f}  kde: {val['kde']:.4f}", flush=True)
             step = completed_step
             data_wait_started_at = time.monotonic()
