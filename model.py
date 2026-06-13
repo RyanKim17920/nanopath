@@ -217,11 +217,40 @@ class DinoV2ViT(nn.Module):
             "x_norm_patchtokens": x[:, 1 + self.registers :],
         }
 
-    # Probe contract: encode_image returns [registers || patches] for the seg head;
-    # probe_features returns the cls token for classification probes.
+    # EVAL-TIME-ONLY dense readout for the segmentation probe (exp_0114).
+    # `encode_image` is never called in train.py (the trunk + the trained checkpoint are
+    # untouched by this method) and is hit at exactly ONE probe-time callsite
+    # (probe.py: `model.encode_image(...)[:, model.registers:]` -> seg MaskTransformer).
+    # `probe_features` (CLS) is unchanged, so the 7 CLS-pooled probes stay byte-identical.
+    #
+    # Canonical DINOv2/DPT dense-readout recipe: instead of feeding only the last block's
+    # patch tokens to the frozen-trunk seg decoder, FUSE the last `n_fuse` block outputs.
+    # Each collected layer is passed through the trained final LayerNorm `self.norm` (the
+    # `get_intermediate_layers(norm=True)` convention) so every fused layer is in the same
+    # normalized scale the seg head's `proj_dec` expects; we then concat on the CHANNEL dim.
+    # Token axis (=[cls, regs, patches]) is preserved, so probe.py's `[:, registers:]` slice
+    # still drops the register tokens correctly. d_encoder widens 384 -> 384*n_fuse; the
+    # locked seg MaskTransformer auto-adapts via `d_encoder=train_feats.shape[-1]`.
+    # Shallower blocks carry finer spatial / boundary detail (lost after the last block's
+    # global mixing) -> pure seg upside with zero seg/CLS trunk lockstep.
+    DENSE_FUSE_LAYERS = 4
+
     def encode_image(self, x, checkpoint=False):
-        out = self(x, checkpoint=checkpoint)
-        return torch.cat([out["x_norm_regtokens"], out["x_norm_patchtokens"]], dim=1)
+        n_fuse = min(self.DENSE_FUSE_LAYERS, len(self.blocks))
+        take_from = len(self.blocks) - n_fuse  # indices [take_from, depth) inclusive of last
+        x = self._prepare_tokens(x)
+        collected = []
+        for i, blk in enumerate(self.blocks):
+            if checkpoint and self.training:
+                x = torch.utils.checkpoint.checkpoint(blk, x, use_reentrant=False)
+            else:
+                x = blk(x)
+            if i >= take_from:
+                # Norm a clone so the running trunk activation is untouched across layers.
+                xn = self.norm(x)
+                collected.append(xn[:, 1:])  # drop cls; keep [regs || patches]
+        # Channel-concat the fused layers (shallow -> deep), preserving token order.
+        return torch.cat(collected, dim=-1)
 
     def probe_features(self, x):
         return self(x)["x_norm_clstoken"]
