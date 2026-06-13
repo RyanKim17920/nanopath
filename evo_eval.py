@@ -3,10 +3,25 @@
 # and emits one evo trace per downstream probe + the mean (final_probe_score) as the
 # experiment score. It never retrains and never touches probe.py / benchmarking/.
 # Usage (registered as the evo --benchmark command): python3 evo_eval.py <summary.json>
-import json, os, sys
+import json, os, re, sys
 from datetime import datetime, timezone
 
 summary = json.load(open(sys.argv[1]))
+
+# STALE-SUMMARY GUARD (anti false-commit). A new worktree inherits its parent's run_summary.json
+# at creation time. If a subagent calls `evo run` BEFORE writing THIS experiment's own summary,
+# we would score the parent's stale copy verbatim (byte-identical scores, +0.0000 delta) and
+# commit a fake node — the "score found before the run / became a starting node" bug
+# (exp_0135/0139/0145). Detect it: the summary's config_path/output_dir must reference THIS
+# experiment id, not a different exp_NNNN. Crash loudly rather than commit a phantom score.
+_eid = os.environ.get("EVO_EXPERIMENT_ID", "")
+if re.fullmatch(r"exp_\d{4}", _eid or ""):
+    _ref = f"{summary.get('config_path','')} {summary.get('output_dir','')} {summary.get('wandb','')}"
+    _others = set(re.findall(r"exp_\d{4}", _ref)) - {_eid}
+    if _others and _eid not in _ref:
+        sys.exit(f"STALE SUMMARY: run_summary.json belongs to {sorted(_others)}, not {_eid}. You "
+                 f"called `evo run` before writing {_eid}'s OWN summary.json (it is still the parent's "
+                 f"inherited copy). Produce {_eid}'s real run_summary.json first, then re-run.")
 
 # The 8 canonical probes -> their summary.json aggregate key, plus a substring that
 # selects that probe's constituent per-dataset metrics (attached as trace extras so
