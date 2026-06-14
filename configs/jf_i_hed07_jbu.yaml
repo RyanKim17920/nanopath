@@ -2,7 +2,7 @@ project:
   name: jf-i-hed07-jbu
   family: nanopath
   recipe_id: dinov2-vits14-reg-jepa-mask10
-  output_dir: /data/ryan.kim/nanopath/evo/exp_0176
+  output_dir: /data/ryan.kim/nanopath/evo/exp_0179
   wandb_dir: /data/$USER/nanopath/wandb
 data:
   dataset_dir: /data/nanopath_parquet

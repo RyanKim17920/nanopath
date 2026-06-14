@@ -306,8 +306,44 @@ class DinoV2ViT(nn.Module):
         # Token axis stays [regs || dense patches] so probe.py's `[:, registers:]` slice is correct.
         return torch.cat([regs, dense], dim=1)
 
+    # exp_0179: EVAL-ONLY multi-depth CLS readout for the classification probes
+    # (linear/knn/16shot -- and, structurally, mutation/survival, which the locked probe.py
+    # also routes through probe_features). The trunk + checkpoint are UNTOUCHED (this is hit
+    # only at probe time; train.py never calls probe_features), and encode_image / the seg
+    # densifier path is byte-identical -> segmentation stays at exp_0176's 0.33090.
+    #
+    # Bottleneck: the live mover for CLS classification is the EVAL-SIDE readout geometry, not
+    # the weights. The known ceiling is the val_dino back-75% late-rise -- the DINO head sits on
+    # the FINAL CLS, so the DINO/CLS overfit corruption concentrates in the last blocks. The
+    # final-block normed CLS alone is what gives exp_0176's best-yet linear=0.7694; we AUGMENT it
+    # with an INTERMEDIATE-depth normed CLS taken BEFORE the heavy overfit band, recovering linear
+    # discriminability the late overfit erased. Each collected CLS is passed through the trained
+    # final LayerNorm `self.norm` (the get_intermediate_layers(norm=True) convention) so both
+    # depths sit in the same normalized scale before channel-concat.
+    #
+    # Depth selection: {block 8, block 11}. Block 11 (final) preserves the current best signal;
+    # block 8 (2/3 through the 12-block trunk) is the deepest PRE-final-specialization layer --
+    # still highly discriminative but not yet collapsed onto the DINO prototypes. SPARSE 2-depth
+    # (one final + one intermediate) deliberately AVOIDS exp_0048's blind last-4 stack
+    # (blocks 8-11 -> progression -0.0479): we EXCLUDE the corrupted blocks 9,10 band rather than
+    # stacking it. Follows exp_0164's intermediate-depth-selection precedent (applied there to the
+    # dense readout; applied here to CLS). Feature dim widens 384 -> 768; the locked linear/knn/
+    # 16shot probes read e.shape[1] dynamically and auto-adapt.
+    CLS_READOUT_DEPTHS = (8, 11)
+
     def probe_features(self, x):
-        return self(x)["x_norm_clstoken"]
+        depths = set(d % len(self.blocks) for d in self.CLS_READOUT_DEPTHS)
+        last = len(self.blocks) - 1
+        xt = self._prepare_tokens(x)
+        collected = []
+        for i, blk in enumerate(self.blocks):
+            xt = blk(xt)
+            if i in depths:
+                # Norm a clone so the running trunk activation is untouched across layers.
+                collected.append(self.norm(xt)[:, 0])
+        if last not in depths:  # safety: always keep the final-block CLS signal
+            collected.append(self.norm(xt)[:, 0])
+        return torch.cat(collected, dim=-1)
 
 
 # Strict-load Meta's pretrained weights for the model's declared variant.
