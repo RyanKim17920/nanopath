@@ -329,7 +329,10 @@ class DinoV2ViT(nn.Module):
     # stacking it. Follows exp_0164's intermediate-depth-selection precedent (applied there to the
     # dense readout; applied here to CLS). Feature dim widens 384 -> 768; the locked linear/knn/
     # 16shot probes read e.shape[1] dynamically and auto-adapt.
-    CLS_READOUT_DEPTHS = (8, 11)
+    # exp_0214: 4-block strided CLS-concat readout (4,6,8,11) -- extends proven (8,11) to
+    # 4-depth strided selection with ~2-step stride covering a wider depth range.
+    # Block 4 (early mid-trunk) + block 6 + block 8 + block 11. Feature dim 384 -> 1536 (4x384).
+    CLS_READOUT_DEPTHS = (4, 6, 8, 11)
 
     def probe_features(self, x):
         depths = set(d % len(self.blocks) for d in self.CLS_READOUT_DEPTHS)

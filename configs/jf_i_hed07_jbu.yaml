@@ -1,8 +1,8 @@
 project:
-  name: jf-i-hed07-jbu
+  name: exp0214-block-strided-retrain
   family: nanopath
   recipe_id: dinov2-vits14-reg-jepa-mask10
-  output_dir: /data/ryan.kim/nanopath/evo/exp_0179
+  output_dir: /data/ryan.kim/nanopath/evo/exp_0214_retrain
   wandb_dir: /data/$USER/nanopath/wandb
 data:
   dataset_dir: /data/nanopath_parquet
@@ -46,14 +46,8 @@ train:
   local_views: 8
   global_size: 224
   local_size: 112
-  # exp_0176 (port of exp_0167): re-probe the FINISHED exp_0114 checkpoint (examples_seen already
-  # == 1e6, so the train loop at while-examples_seen+batch_size<=max never enters and the trunk/CLS
-  # weights are BYTE-IDENTICAL to the committed exp_0114) under the new EVAL-ONLY JBU seg
-  # densifier. reprobe_only=true starts a fresh wandb identity so summary.json points at exp_0176,
-  # not the parent (false-commit guard). resume keeps batch_size=128 (irrelevant -- no train steps
-  # run); output_dir is THIS exp's own dir so evo_eval's stale-summary guard passes.
-  resume: /data/ryan.kim/nanopath/evo/exp_0114/latest.pt
-  reprobe_only: true
+  resume:
+  reprobe_only: false
 dino:
   lr: 0.000125
   lr_min: 1.0e-06
