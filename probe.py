@@ -487,6 +487,32 @@ def _seg_head_jaccard(model, mean, std, device, train_images, train_labels, val_
     return _seg_head_jaccard_from_feats(device, train_feats, train_labels, val_feats, val_labels, n_cls, SEG_SPLIT_SEED)
 
 
+
+# --- node-local staging: copy large seg arrays to local disk once (shared across same-node
+# jobs) so concurrent segmentation probes don't thrash /data via random mmap page faults. ---
+_SEG_CACHE = os.environ.get("NP_SEG_CACHE", "/tmp/nanopath_segcache")
+def _stage_local(path):
+    """Copy a big array file to node-local disk once and return the local path; on any error
+    (or if NP_SEG_CACHE disabled) fall back to the original /data path. Same-node jobs reuse
+    one copy, turning N concurrent network reads into a single bounded sequential copy."""
+    try:
+        if os.environ.get("NP_SEG_CACHE") == "off":
+            return str(path)
+        import hashlib, shutil
+        src = str(path); st = os.stat(src)
+        key = hashlib.md5(f"{src}:{st.st_size}:{int(st.st_mtime)}".encode()).hexdigest()
+        os.makedirs(_SEG_CACHE, exist_ok=True)
+        dst = os.path.join(_SEG_CACHE, key + os.path.splitext(src)[1]); done = dst + ".done"
+        if not os.path.exists(done):
+            tmp = dst + f".tmp.{os.getpid()}"
+            shutil.copyfile(src, tmp); os.replace(tmp, dst); open(done, "w").close()
+        for _ in range(900):
+            if os.path.exists(done): break
+            time.sleep(1)
+        return dst if os.path.exists(done) else src
+    except Exception:
+        return str(path)
+
 def inline_pannuke_jaccard(model, mean, std, device):
     import numpy as np
     started_at = time.monotonic()
@@ -497,10 +523,10 @@ def inline_pannuke_jaccard(model, mean, std, device):
             layer = ((j + 1) * np.clip(masks[..., j], 0, 1)).astype(np.int64)
             labels = np.where(layer != 0, layer, labels)
         return labels
-    train_images = np.load(pannuke_root / PANNUKE_FOLDS["train"].format(kind="images"), mmap_mode="r")
-    val_images = np.load(pannuke_root / PANNUKE_FOLDS["val"].format(kind="images"), mmap_mode="r")
-    train_labels = derive_labels(np.load(pannuke_root / PANNUKE_FOLDS["train"].format(kind="masks"), mmap_mode="r"))
-    val_labels = derive_labels(np.load(pannuke_root / PANNUKE_FOLDS["val"].format(kind="masks"), mmap_mode="r"))
+    train_images = np.load(_stage_local(pannuke_root / PANNUKE_FOLDS["train"].format(kind="images")), mmap_mode="r")
+    val_images = np.load(_stage_local(pannuke_root / PANNUKE_FOLDS["val"].format(kind="images")), mmap_mode="r")
+    train_labels = derive_labels(np.load(_stage_local(pannuke_root / PANNUKE_FOLDS["train"].format(kind="masks")), mmap_mode="r"))
+    val_labels = derive_labels(np.load(_stage_local(pannuke_root / PANNUKE_FOLDS["val"].format(kind="masks")), mmap_mode="r"))
     return _seg_head_jaccard(model, mean, std, device, train_images, train_labels, val_images, val_labels, PANNUKE_NUM_CLASSES), time.monotonic() - started_at
 
 
