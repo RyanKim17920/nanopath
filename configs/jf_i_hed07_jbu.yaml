@@ -70,7 +70,7 @@ dino:
   # No training steps run on re-probe, so no teacher snapshots are captured; keep the
   # post-hoc EMA averaging OFF to avoid a no-op confound (the encoder probed is exactly
   # exp_0114's committed checkpoint).
-  posthoc_ema: true
+  posthoc_ema: false
   posthoc_ema_max_snapshots: 48
   posthoc_ema_gammas: [0.0, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
   posthoc_ema_min_end_frac: 0.25
