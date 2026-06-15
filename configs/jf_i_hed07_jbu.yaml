@@ -1,9 +1,9 @@
 project:
-  name: exp0214-block-strided-retrain
+  name: block-strided-cls-4681
   family: nanopath
   recipe_id: dinov2-vits14-reg-jepa-mask10
-  output_dir: /data/ryan.kim/nanopath/evo/exp_0214_retrain
-  wandb_dir: /data/$USER/nanopath/wandb
+  output_dir: data/block-strided-cls-4681
+  wandb_dir: data/wandb
 data:
   dataset_dir: /data/nanopath_parquet
   split_seed: 7777
