@@ -62,11 +62,7 @@ dino:
   jepa_pred_width: 0
   jepa_blocks: 4
   jepa_block_scale: 0.10
-  # exp_0145: exercise the post-hoc power-EMA snapshot solve during smoke (few snapshots).
-  posthoc_ema: true
-  posthoc_ema_max_snapshots: 8
-  posthoc_ema_gammas: [0.0, 2.0, 8.0]
-  posthoc_ema_min_end_frac: 0.0
+  posthoc_ema: false
 
 probe:
   enabled: true
