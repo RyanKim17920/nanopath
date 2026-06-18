@@ -6,7 +6,7 @@
 # a strict load.
 #
 # DINOHead is the small MLP + weight-normed classifier used by train.py for the
-# DINO CLS / iBOT patch self-distillation losses. It is intentionally trivial
+# DINO CLS self-distillation loss. It is intentionally trivial
 # (~15 lines) so we have zero runtime dependency on the dinov2 codebase.
 
 import os
@@ -47,12 +47,13 @@ class LayerScale(nn.Module):
     def forward(self, x): return x * self.gamma
 
 
-# Module-level list for per-layer attention diagnostics; populated during log_diagnostics forward passes.
-_diags = []
-
-def clear_diags(): _diags.clear()
-def collect_diags():
-    d = _diags.copy(); _diags.clear(); return d
+# FINO gradient gate: identity forward, scales the gradient by `scale` on backward. sign>0 encourages the
+# encoder to predict a metadata factor (M+); sign<0 reverses the gradient to suppress it (M-, DANN-style).
+class GradScale(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, scale): ctx.scale = scale; return x
+    @staticmethod
+    def backward(ctx, g): return g * ctx.scale, None
 
 
 # Attention with single qkv Linear + F.scaled_dot_product_attention (Flash-2 backend on H100 bf16).
@@ -63,18 +64,11 @@ class Attention(nn.Module):
         self.qkv = nn.Linear(dim, dim * 3, bias=True)
         self.proj = nn.Linear(dim, dim, bias=True)
 
-    def forward(self, x, log_diagnostics=False):
+    def forward(self, x):
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.heads, C // self.heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
         out = F.scaled_dot_product_attention(q, k, v).transpose(1, 2).reshape(B, N, C)
-        if log_diagnostics:
-            _diags.append({
-                "q_norm": float(q.norm(dim=-1).mean().detach()),
-                "k_norm": float(k.norm(dim=-1).mean().detach()),
-                "v_norm": float(v.norm(dim=-1).mean().detach()),
-                "qk_sim_max": float((q @ k.transpose(-2, -1)).amax(dim=-1).mean().detach()),
-            })
         return self.proj(out)
 
 
@@ -109,8 +103,8 @@ class Block(nn.Module):
 
     def _ff(self, x): return self.mlp(x) if isinstance(self.mlp, SwiGLU) else self.mlp.fc2(F.gelu(self.mlp.fc1(x)))
 
-    def forward(self, x, log_diagnostics=False):
-        x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x), log_diagnostics=log_diagnostics)))
+    def forward(self, x):
+        x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x))))
         x = x + self.drop_path2(self.ls2(self._ff(self.norm2(x))))
         return x
 
@@ -149,7 +143,7 @@ class DinoV2ViT(nn.Module):
         patch_pos = patch_pos.permute(0, 2, 3, 1).reshape(1, h * w, -1).to(self.pos_embed.dtype)
         return torch.cat([cls_pos, patch_pos], dim=1) if cls_pos is not None else patch_pos
 
-    # Build [cls, registers, patches] tokens; iBOT swaps the masked patch positions for mask_token.
+    # Build [cls, registers, patches] tokens; masked patch positions are replaced by mask_token.
     def _prepare_tokens(self, x, masks=None):
         B, _, H, W = x.shape
         h, w = H // self.patch_size, W // self.patch_size
@@ -166,34 +160,8 @@ class DinoV2ViT(nn.Module):
     # Returns the dict shape Meta's `forward_features` returns; used by train.py and probe.py.
     # `checkpoint=True` re-runs each block under torch.utils.checkpoint to trade compute for memory;
     # useful when the 1-GPU batch of 128 (2 globals + 8 locals) does not fit in 80 GB.
-    def forward(self, x, masks=None, checkpoint=False, log_diagnostics=False):
+    def forward(self, x, masks=None, checkpoint=False):
         x = self._prepare_tokens(x, masks)
-        if log_diagnostics:
-            clear_diags()
-            _token_norms = []
-            for blk in self.blocks:
-                x = blk(x, log_diagnostics=True)
-                r = self.registers
-                _token_norms.append({
-                    "cls_norm":   float(x[:, 0].norm(dim=-1).mean().detach()),
-                    "reg_norm":   float(x[:, 1:1 + r].norm(dim=-1).mean().detach()) if r > 0 else 0.0,
-                    "patch_norm": float(x[:, 1 + r:].norm(dim=-1).mean().detach()),
-                })
-            x = self.norm(x)
-            result = {
-                "x_norm_clstoken": x[:, 0],
-                "x_norm_regtokens": x[:, 1 : 1 + self.registers],
-                "x_norm_patchtokens": x[:, 1 + self.registers :],
-            }
-            _layers = collect_diags()
-            for i, tn in enumerate(_token_norms):
-                if i < len(_layers):
-                    _layers[i].update(tn)
-            result["_diagnostics"] = _layers
-            result["_final_norm_cls"] = float(x[:, 0].norm(dim=-1).mean().detach())
-            result["_final_norm_reg"] = float(x[:, 1 : 1 + self.registers].norm(dim=-1).mean().detach())
-            result["_final_norm_patch"] = float(x[:, 1 + self.registers :].norm(dim=-1).mean().detach())
-            return result
         for blk in self.blocks:
             if checkpoint and self.training:
                 x = torch.utils.checkpoint.checkpoint(blk, x, use_reentrant=False)
@@ -206,36 +174,38 @@ class DinoV2ViT(nn.Module):
             "x_norm_patchtokens": x[:, 1 + self.registers :],
         }
 
-    # Pre-probe: Multi-Depth CLS Concatenation for classification probes.
-    # Collects normalized CLS tokens from strided transformer depths 4, 6, 8, 11,
-    # concatenates them, projects back to embed_dim, and applies final norm.
-    # Eval-only — projection weights are lazy-init (frozen; no training needed).
+    # --- Combined Pre-Probe Stack (gated by COMBINED_PREPROBE=1 env var) ---
+    #
+    # 1. Multi-Depth CLS Concatenation (Classification):
+    #    Collect normalized CLS tokens from strided transformer depths 4,6,8,11,
+    #    concatenate, project to embed_dim, apply final norm.
+    # 2. JBU Densifier (Segmentation):
+    #    Concatenate last four normalized block outputs, keep register tokens,
+    #    convert patch tokens to 32x32 feature grid with image-guided upsample + sharpening.
+    #
+    # Both components are eval-only with lazy-init projection weights (frozen, no training).
+    # --------------------------------------------------------------------------
+
     def _multi_depth_probe_features(self, x):
+        """Multi-Depth CLS Concatenation: strided depths 4,6,8,11 -> concat -> project -> norm."""
         x_tokens = self._prepare_tokens(x)
-        # Strided depths: 4, 6, 8, 11 (1-indexed) — covers early/mid/late transformer
         depths = [4, 6, 8, 11]
         cls_raw = []
         for i, blk in enumerate(self.blocks):
             x_tokens = blk(x_tokens)
             if (i + 1) in depths:
-                # Normalize each depth's CLS token independently for stability
                 cls_raw.append(F.normalize(x_tokens[:, 0], dim=-1))
         concatenated = torch.cat(cls_raw, dim=-1)
-        # Lazy-init projection: Xavier uniform, frozen after first forward
         if not hasattr(self, "_md_cls_proj"):
             in_dim = concatenated.shape[-1]
             self._md_cls_proj = nn.Linear(in_dim, self.embed_dim, bias=False).to(concatenated)
             nn.init.xavier_uniform_(self._md_cls_proj.weight)
         return self.norm(self._md_cls_proj(concatenated))
 
-    # Pre-probe: JBU-inspired segmentation densifier for encode_image.
-    # Concatenates last four normalized block outputs, keeps register tokens,
-    # and converts patch tokens into a denser 32x32 feature grid via
-    # lightweight image-guided upsample + sharpening step.
     def _jbu_dense_encode_image(self, x, checkpoint=False):
+        """JBU-inspired segmentation densifier: last-4 blocks -> 32x32 grid."""
         B, _, H, W = x.shape
         h, w = H // self.patch_size, W // self.patch_size
-        # Forward through blocks, collecting last-4 normalized outputs
         tokens = self._prepare_tokens(x, masks=None)
         last_four = []
         for blk in self.blocks:
@@ -246,48 +216,33 @@ class DinoV2ViT(nn.Module):
             last_four.append(tokens.clone())
             if len(last_four) > 4:
                 last_four.pop(0)
-        # Final norm
         tokens = self.norm(tokens)
-        # Also normalize the intermediate snapshots for stable concatenation
-        normed_intermediate = []
-        for snap in last_four:
-            # Per-token L2 norm for each snapshot
-            normed_intermediate.append(F.normalize(snap, dim=-1))
-        # Concatenate: [B, N, 4*dim]
+        normed_intermediate = [F.normalize(snap, dim=-1) for snap in last_four]
         stacked = torch.cat(normed_intermediate, dim=-1)
-        # Separate cls, register, patch tokens from stacked representation
         reg_count = self.registers
-        patch_stacked = stacked[:, reg_count:, :]  # [B, h*w, 4*dim]
-        reg_stacked = stacked[:, :reg_count, :]    # [B, reg, 4*dim]
-        # Project patch features: 4*dim -> dim
+        # Skip cls (pos 0), take regs (pos 1..reg), patches (pos 1+reg..end)
+        reg_stacked = stacked[:, 1 : 1 + reg_count, :]
+        patch_stacked = stacked[:, 1 + reg_count:, :]
         if not hasattr(self, "_jbu_patch_proj"):
             self._jbu_patch_proj = nn.Linear(4 * self.embed_dim, self.embed_dim, bias=False).to(patch_stacked)
             nn.init.xavier_uniform_(self._jbu_patch_proj.weight)
-        patch_feat = self._jbu_patch_proj(patch_stacked)  # [B, h*w, dim]
-        # Reshape to spatial grid
+        patch_feat = self._jbu_patch_proj(patch_stacked)
         patch_grid = patch_feat.permute(0, 2, 1).reshape(B, self.embed_dim, h, w)
-        # Image-guided upsample to 32x32 (or nearest useful grid)
         target_size = max(32, h * 2)
         upsampled = F.interpolate(patch_grid, size=target_size, mode='bilinear', align_corners=False)
-        # Lightweight sharpening: residual of original - lowpass
         lowpass = F.interpolate(upsampled, size=target_size // 2, mode='bilinear', align_corners=False)
         lowpass = F.interpolate(lowpass, size=target_size, mode='bilinear', align_corners=False)
         sharpened = upsampled + 0.25 * (upsampled - lowpass)
-        # Normalize channels
         sharpened = F.normalize(sharpened, p=2, dim=1)
-        # Flatten back to token sequence
-        seg_feat = sharpened.flatten(2).transpose(1, 2)  # [B, target_size*target_size, dim]
-        # Project register tokens from stacked
+        seg_feat = sharpened.flatten(2).transpose(1, 2)
         if not hasattr(self, "_jbu_reg_proj"):
             self._jbu_reg_proj = nn.Linear(4 * self.embed_dim, self.embed_dim, bias=False).to(reg_stacked)
             nn.init.xavier_uniform_(self._jbu_reg_proj.weight)
-        reg_feat = self._jbu_reg_proj(reg_stacked)  # [B, reg, dim]
+        reg_feat = self._jbu_reg_proj(reg_stacked)
         return torch.cat([reg_feat, seg_feat], dim=1)
 
     # Probe contract: encode_image returns [registers || patches] for the seg head;
     # probe_features returns the cls token for classification probes.
-    # With COMBINED_PREPROBE=1 env: uses multi-depth CLS for classification
-    # and JBU densifier for segmentation.
     def encode_image(self, x, checkpoint=False):
         if os.environ.get("COMBINED_PREPROBE") == "1":
             return self._jbu_dense_encode_image(x, checkpoint=checkpoint)
@@ -309,7 +264,7 @@ def load_dinov2_pretrained(model):
     return model
 
 
-# DINO/iBOT projection head: 3-layer MLP (in -> hidden -> hidden -> bottleneck) + L2 norm +
+# DINO projection head: 3-layer MLP (in -> hidden -> hidden -> bottleneck) + L2 norm +
 # weight-normed Linear(bottleneck -> n_prototypes) with weight_g frozen at 1, matching the
 # behaviour of dinov2.layers.DINOHead. Standalone reimplementation (no xformers, no fvcore).
 class DINOHead(nn.Module):
@@ -331,3 +286,26 @@ class DINOHead(nn.Module):
         x = self.mlp(x)
         x = F.normalize(x, dim=-1, p=2)
         return self.last_layer(x)
+
+
+# I-JEPA predictor head: regresses EMA-teacher patch representations at masked target blocks from the student's
+# block-masked patch tokens. FINO/JEPA-T option: n_cond>0 adds a learned per-class embedding (idx 0 = missing/-1)
+# of a discrete metadata factor to every patch token, so the latent-regression target is metadata-aware
+# (a dense-path alternative to CLS-token steering). n_cond=0 is plain I-JEPA.
+class JEPAPredictor(nn.Module):
+    def __init__(self, dim, depth=4, width=0, heads=6, n_cond=0):
+        super().__init__()
+        width = width or dim
+        self.proj_in = nn.Linear(dim, width) if width != dim else nn.Identity()
+        self.cond_emb = nn.Embedding(n_cond + 1, width) if n_cond else None
+        self.blocks = nn.ModuleList(Block(width, heads, 4.0, 0.0) for _ in range(depth))
+        self.norm = nn.LayerNorm(width, eps=1e-6)
+        self.proj = nn.Linear(width, dim, bias=True)
+
+    def forward(self, patch_tokens, cond=None):
+        x = self.proj_in(patch_tokens)
+        if self.cond_emb is not None and cond is not None:
+            x = x + self.cond_emb(cond + 1).unsqueeze(1)  # broadcast factor embedding over patches; cond=-1 -> idx 0
+        for blk in self.blocks:
+            x = blk(x)
+        return self.proj(self.norm(x))
