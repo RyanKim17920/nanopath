@@ -9,6 +9,7 @@
 # DINO CLS / iBOT patch self-distillation losses. It is intentionally trivial
 # (~15 lines) so we have zero runtime dependency on the dinov2 codebase.
 
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -205,13 +206,97 @@ class DinoV2ViT(nn.Module):
             "x_norm_patchtokens": x[:, 1 + self.registers :],
         }
 
+    # Pre-probe: Multi-Depth CLS Concatenation for classification probes.
+    # Collects normalized CLS tokens from strided transformer depths 4, 6, 8, 11,
+    # concatenates them, projects back to embed_dim, and applies final norm.
+    # Eval-only — projection weights are lazy-init (frozen; no training needed).
+    def _multi_depth_probe_features(self, x):
+        x_tokens = self._prepare_tokens(x)
+        # Strided depths: 4, 6, 8, 11 (1-indexed) — covers early/mid/late transformer
+        depths = [4, 6, 8, 11]
+        cls_raw = []
+        for i, blk in enumerate(self.blocks):
+            x_tokens = blk(x_tokens)
+            if (i + 1) in depths:
+                # Normalize each depth's CLS token independently for stability
+                cls_raw.append(F.normalize(x_tokens[:, 0], dim=-1))
+        concatenated = torch.cat(cls_raw, dim=-1)
+        # Lazy-init projection: Xavier uniform, frozen after first forward
+        if not hasattr(self, "_md_cls_proj"):
+            in_dim = concatenated.shape[-1]
+            self._md_cls_proj = nn.Linear(in_dim, self.embed_dim, bias=False).to(concatenated)
+            nn.init.xavier_uniform_(self._md_cls_proj.weight)
+        return self.norm(self._md_cls_proj(concatenated))
+
+    # Pre-probe: JBU-inspired segmentation densifier for encode_image.
+    # Concatenates last four normalized block outputs, keeps register tokens,
+    # and converts patch tokens into a denser 32x32 feature grid via
+    # lightweight image-guided upsample + sharpening step.
+    def _jbu_dense_encode_image(self, x, checkpoint=False):
+        B, _, H, W = x.shape
+        h, w = H // self.patch_size, W // self.patch_size
+        # Forward through blocks, collecting last-4 normalized outputs
+        tokens = self._prepare_tokens(x, masks=None)
+        last_four = []
+        for blk in self.blocks:
+            if checkpoint and self.training:
+                tokens = torch.utils.checkpoint.checkpoint(blk, tokens, use_reentrant=False)
+            else:
+                tokens = blk(tokens)
+            last_four.append(tokens.clone())
+            if len(last_four) > 4:
+                last_four.pop(0)
+        # Final norm
+        tokens = self.norm(tokens)
+        # Also normalize the intermediate snapshots for stable concatenation
+        normed_intermediate = []
+        for snap in last_four:
+            # Per-token L2 norm for each snapshot
+            normed_intermediate.append(F.normalize(snap, dim=-1))
+        # Concatenate: [B, N, 4*dim]
+        stacked = torch.cat(normed_intermediate, dim=-1)
+        # Separate cls, register, patch tokens from stacked representation
+        reg_count = self.registers
+        patch_stacked = stacked[:, reg_count:, :]  # [B, h*w, 4*dim]
+        reg_stacked = stacked[:, :reg_count, :]    # [B, reg, 4*dim]
+        # Project patch features: 4*dim -> dim
+        if not hasattr(self, "_jbu_patch_proj"):
+            self._jbu_patch_proj = nn.Linear(4 * self.embed_dim, self.embed_dim, bias=False).to(patch_stacked)
+            nn.init.xavier_uniform_(self._jbu_patch_proj.weight)
+        patch_feat = self._jbu_patch_proj(patch_stacked)  # [B, h*w, dim]
+        # Reshape to spatial grid
+        patch_grid = patch_feat.permute(0, 2, 1).reshape(B, self.embed_dim, h, w)
+        # Image-guided upsample to 32x32 (or nearest useful grid)
+        target_size = max(32, h * 2)
+        upsampled = F.interpolate(patch_grid, size=target_size, mode='bilinear', align_corners=False)
+        # Lightweight sharpening: residual of original - lowpass
+        lowpass = F.interpolate(upsampled, size=target_size // 2, mode='bilinear', align_corners=False)
+        lowpass = F.interpolate(lowpass, size=target_size, mode='bilinear', align_corners=False)
+        sharpened = upsampled + 0.25 * (upsampled - lowpass)
+        # Normalize channels
+        sharpened = F.normalize(sharpened, p=2, dim=1)
+        # Flatten back to token sequence
+        seg_feat = sharpened.flatten(2).transpose(1, 2)  # [B, target_size*target_size, dim]
+        # Project register tokens from stacked
+        if not hasattr(self, "_jbu_reg_proj"):
+            self._jbu_reg_proj = nn.Linear(4 * self.embed_dim, self.embed_dim, bias=False).to(reg_stacked)
+            nn.init.xavier_uniform_(self._jbu_reg_proj.weight)
+        reg_feat = self._jbu_reg_proj(reg_stacked)  # [B, reg, dim]
+        return torch.cat([reg_feat, seg_feat], dim=1)
+
     # Probe contract: encode_image returns [registers || patches] for the seg head;
     # probe_features returns the cls token for classification probes.
+    # With COMBINED_PREPROBE=1 env: uses multi-depth CLS for classification
+    # and JBU densifier for segmentation.
     def encode_image(self, x, checkpoint=False):
+        if os.environ.get("COMBINED_PREPROBE") == "1":
+            return self._jbu_dense_encode_image(x, checkpoint=checkpoint)
         out = self(x, checkpoint=checkpoint)
         return torch.cat([out["x_norm_regtokens"], out["x_norm_patchtokens"]], dim=1)
 
     def probe_features(self, x):
+        if os.environ.get("COMBINED_PREPROBE") == "1":
+            return self._multi_depth_probe_features(x)
         return self(x)["x_norm_clstoken"]
 
 
