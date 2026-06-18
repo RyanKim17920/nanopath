@@ -294,18 +294,10 @@ def main():
         wandb_init["id"] = wandb_meta["id"]
         wandb_init["resume"] = "must"
     wandb_run = wandb.init(**wandb_init)
-    # wandb panel grouping: route headline losses into main-train-results/, everything else
-    # (non-diag, non-probe) into train-tracking/; diag/ and probe/ keys keep their prefix.
-    _MAIN_KEYS = {"dino", "ibot", "kde", "total", "grad_norm", "lr",
-                  "val_dino", "val_ibot", "val_kde", "val_total"}
-
-    def _panel(k):
-        if k.startswith("diag/") or k.startswith("probe/") or k.startswith("main-outcomes"):
-            return k
-        if k in _MAIN_KEYS:
-            return f"main-train-results/{k}"
-        return f"train-tracking/{k}"
-
+    # Headline losses are additionally mirrored into a clean main-train-results/ glance panel
+    # (train + val losses together). The stable train/*/val/* keys are kept untouched so cross-run
+    # history still works; main-train-results/* is an additive copy, not a rename.
+    headline_losses = {"dino", "ibot", "kde", "total", "grad_norm", "lr"}
     for key in ("probe/target_flops", "probe/wall_seconds"):
         wandb_run.define_metric(key, hidden=True, overwrite=True)
     print(
@@ -474,44 +466,50 @@ def main():
         return dict(zip(("dino", "ibot", "kde", "total"), (sums / max(1, n_batches)).tolist()))
 
     # Ingest completed probe result JSONs into metrics.jsonl and wandb.
+    last_main_outcomes_step = -1
+
     def log_probe_results():
         if probe_state is not None:
             collect_probe_results(probe_state, wandb_run, metrics_path)
             log_main_outcomes()
 
-    # Logging-only: surface the headline downstream probe scores in a clean
-    # `main-outcomes/` wandb panel (plus per-dataset `main-outcomes-datasets/`)
-    # instead of the flat probe/* keys. Guarded so it can never crash training.
+    # Logging-only: surface the headline downstream probe scores in a clean `main-outcomes/`
+    # wandb panel (plus per-dataset `main-outcomes-datasets/`) alongside the flat probe/* keys.
+    # log_probe_results() runs on every train log step, so guard on the last logged train_step to
+    # emit each probe result exactly once instead of re-logging the latest one at the same step.
     def log_main_outcomes():
+        nonlocal last_main_outcomes_step
         if wandb_run is None or probe_state is None:
             return
-        try:
-            results = sorted(probe_state["paths"]["results_dir"].glob("step_*.json"))
-            if not results:
-                return
-            result = json.loads(results[-1].read_text())
-            metrics = result["metrics"]
-            train_step = int(result["train_step"])
-            headline = {
-                "main-outcomes/linear": "linear_mean_f1",
-                "main-outcomes/knn": "knn_mean_f1",
-                "main-outcomes/16-shot": "fewshot_mean_f1",
-                "main-outcomes/segmentation": "seg_mean_jaccard",
-                "main-outcomes/progression": "slide_mean_auc",
-                "main-outcomes/mutation": "auc_mean",
-                "main-outcomes/survival": "survival_mean_cindex",
-                "main-outcomes/robustness": "robustness_mean",
-                "main-outcomes/mean": "mean_probe_score",
-            }
-            mean_keys = set(headline.values())
-            payload = {panel: float(metrics[src]) for panel, src in headline.items() if src in metrics}
-            for key, value in metrics.items():
-                if key.endswith("_score") and key not in mean_keys:
-                    payload[f"main-outcomes-datasets/{key[:-len('_score')]}"] = float(value)
-            if payload:
-                wandb_run.log(payload, step=train_step)
-        except Exception as exc:
-            print(f"{console_prefix()} log_main_outcomes skipped: {exc}", flush=True)
+        results = sorted(probe_state["paths"]["results_dir"].glob("step_*.json"))
+        if not results:
+            return
+        result = json.loads(results[-1].read_text())
+        train_step = int(result["train_step"])
+        if train_step <= last_main_outcomes_step:
+            return
+        metrics = result["metrics"]
+        headline = {
+            "main-outcomes/linear": "linear_mean_f1",
+            "main-outcomes/knn": "knn_mean_f1",
+            "main-outcomes/16-shot": "fewshot_mean_f1",
+            "main-outcomes/segmentation": "seg_mean_jaccard",
+            "main-outcomes/progression": "slide_mean_auc",
+            "main-outcomes/mutation": "auc_mean",
+            "main-outcomes/survival": "survival_mean_cindex",
+            "main-outcomes/robustness": "robustness_mean",
+            "main-outcomes/mean": "mean_probe_score",
+        }
+        headline_srcs = set(headline.values())
+        payload = {panel: float(metrics[src]) for panel, src in headline.items() if src in metrics}
+        for key, value in metrics.items():
+            # Per-dataset scores are named probe_<dataset>_score; mirror collect_probe_results and
+            # strip the probe_ prefix so these match the probe/<dataset>_score keys (keep _score).
+            if key.endswith("_score") and key not in headline_srcs:
+                payload[f"main-outcomes-datasets/{key.removeprefix('probe_')}"] = float(value)
+        if payload:
+            wandb_run.log(payload, step=train_step)
+            last_main_outcomes_step = train_step
 
     # Queue a probe at `checkpoint_step` for the given sample target; no-op if already done.
     def run_probe_at(checkpoint_step, target_samples):
@@ -533,7 +531,7 @@ def main():
 
     log_probe_results()
     max_train_flops = int(train_cfg["max_train_flops"])
-    diag_every = int(train_cfg.get("log_diagnostics_every", 0) or 0)
+    diag_every = int(train_cfg["log_diagnostics_every"])
     warmup_train_samples = math.ceil(max_train_samples * dino_cfg["warmup_fraction"])
     # Probe targets are sample milestones: one tile counts once even with many global/local crops.
     probe_count = int(cfg["probe"]["count"]) if probe_enabled(cfg) else 0
@@ -568,7 +566,11 @@ def main():
             student_ibot_head.train()
             completed_step = step + 1
             should_log = completed_step == 1 or completed_step % train_cfg["log_every"] == 0
-            should_diag = diag_every > 0 and should_log and completed_step % diag_every == 0
+            # Skip diagnostics on the FLOP-measurement step (measured_flops_per_step is None until
+            # the first wrapped step completes) so the reused per-step FLOP estimate excludes
+            # diagnostic-only work.
+            should_diag = (diag_every > 0 and should_log and completed_step % diag_every == 0
+                           and measured_flops_per_step is not None)
             # Data identifiers stay on CPU and feed coverage metrics; image tensors move below.
             for key, batch_key in (("sample", "sample_idx"), ("slide", "slide_id"), ("patient", "patient_id")):
                 pending_ids[key].update(int(x) for x in batch[batch_key].tolist())
@@ -712,10 +714,15 @@ def main():
                 last_console_monotonic = console_now
                 with metrics_path.open("a") as handle:
                     handle.write(json.dumps(train_log) + "\n")
-                wandb_run.log(
-                    {_panel(key): value for key, value in train_log.items() if key != "step"},
-                    step=completed_step,
-                )
+                wandb_payload = {}
+                for key, value in train_log.items():
+                    if key == "step":
+                        continue
+                    # diag/* is its own top-level panel; everything else stays under stable train/*.
+                    wandb_payload[key if key.startswith("diag/") else f"train/{key}"] = value
+                    if key in headline_losses:
+                        wandb_payload[f"main-train-results/{key}"] = value
+                wandb_run.log(wandb_payload, step=completed_step)
                 log_probe_results()
                 torch.cuda.reset_peak_memory_stats(device)
             if save_checkpoints and completed_step % save_every == 0:
@@ -730,7 +737,10 @@ def main():
                 val_log = {"step": completed_step, **{f"val_{k}": v for k, v in val.items()}}
                 with metrics_path.open("a") as handle:
                     handle.write(json.dumps(val_log) + "\n")
-                wandb_run.log({_panel(f"val_{k}"): v for k, v in val.items()}, step=completed_step)
+                # val/* stays stable; mirror into main-train-results/ so train+val losses sit together.
+                val_payload = {f"val/{k}": v for k, v in val.items()}
+                val_payload.update({f"main-train-results/val_{k}": v for k, v in val.items()})
+                wandb_run.log(val_payload, step=completed_step)
                 print(f"{console_prefix()} Validation  [{completed_step}]  total: {val['total']:.4f}  dino: {val['dino']:.4f}  ibot: {val['ibot']:.4f}  kde: {val['kde']:.4f}", flush=True)
                 # Reset rate clocks after validation so the next train log is train-rate only.
                 last_console_step, last_console_monotonic = completed_step, time.monotonic()

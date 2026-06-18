@@ -171,7 +171,14 @@ class DinoV2ViT(nn.Module):
             clear_diags()
             _token_norms = []
             for blk in self.blocks:
-                x = blk(x, log_diagnostics=True)
+                # Honor activation checkpointing exactly like the normal path below so a diagnostic
+                # step keeps the same memory/compute profile. The backward recompute re-appends to
+                # _diags, but collect_diags() below already captured the forward-pass values and the
+                # next clear_diags() at the top of this branch discards the stale recompute entries.
+                if checkpoint and self.training:
+                    x = torch.utils.checkpoint.checkpoint(blk, x, use_reentrant=False, log_diagnostics=True)
+                else:
+                    x = blk(x, log_diagnostics=True)
                 r = self.registers
                 _token_norms.append({
                     "cls_norm":   float(x[:, 0].norm(dim=-1).mean().detach()),
