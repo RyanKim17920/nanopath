@@ -264,9 +264,10 @@ def main():
     opt = torch.optim.AdamW(param_groups, lr=1.0, betas=(0.9, dino_cfg["adam_beta2"]))
     # FINO prototype banks: one unit vector per discrete-factor value, EMA-updated from teacher CLS in compute_losses.
     protos = {f: F.normalize(torch.randn(fino_meta["n"][f], student_backbone.embed_dim, device=device), dim=-1) for f, _ in fino_disc} if fino_cfg else {}
-    # FINO grad-equalisation EMA bank (one running grad-norm per factor); init 1.0 -> s_t~1 early. Not checkpointed
+    # FINO grad-equalisation EMA bank (one running grad-norm per factor); lazy-init to the first-step RAW branch
+    # grad-norm (paper-faithful, not 1.0). Guarded against DANN-warmup underflow. Not checkpointed
     # (mu=0.99 -> ~100-step memory, re-warms quickly on resume). Used only when fino.grad_equalize is set.
-    grad_eq_ema = {f: torch.ones((), device=device) for f, _ in (fino_disc + fino_cont)} if fino_cfg else {}
+    grad_eq_ema = {f: None for f, _ in (fino_disc + fino_cont)} if fino_cfg else {}
     step = 0
     batch_size = int(train_cfg["batch_size"])
     max_train_samples = int(train_cfg["max_train_samples"])
@@ -490,9 +491,19 @@ def main():
                 # only; geometric-mean target; no-op for <2 branches). grad_eq_ema = per-factor EMA bank (mu=0.99).
                 if fino_cfg.get("grad_equalize") and len(terms) > 1:
                     g = {f: torch.autograd.grad(L, sg["x_norm_clstoken"], retain_graph=True)[0].norm() for f, L in terms}
-                    for f in g: grad_eq_ema[f] = 0.99 * grad_eq_ema[f] + 0.01 * g[f].detach().float()
-                    nbar = torch.exp(torch.stack([grad_eq_ema[f].log() for f, _ in terms]).mean())
-                    meta_loss = sum((nbar / grad_eq_ema[f]).detach() * L for f, L in terms)
+                    # Paper-faithful lazy init: seed each EMA with the first-step RAW branch grad-norm, not 1.0.
+                    for f in g:
+                        gd = g[f].detach().float()
+                        grad_eq_ema[f] = gd if grad_eq_ema[f] is None else 0.99 * grad_eq_ema[f] + 0.01 * gd
+                    # Warmup-NaN guard: grad-norm is measured THROUGH GradScale(sign*gamma); while gamma~0 during DANN
+                    # warmup every norm underflows ~0 -> geometric-mean ratio 0/0 -> NaN. gamma cancels in the ratio, so
+                    # skipping equalisation until all norms clear the floor is paper-equivalent (metadata barely reaches
+                    # the encoder while gamma~0 anyway).
+                    if all(grad_eq_ema[f] > 1e-12 for f, _ in terms):
+                        nbar = torch.exp(torch.stack([grad_eq_ema[f].log() for f, _ in terms]).mean())
+                        meta_loss = sum((nbar / grad_eq_ema[f]).detach() * L for f, L in terms)
+                    else:
+                        for _, L in terms: meta_loss = meta_loss + L
                 else:
                     for _, L in terms: meta_loss = meta_loss + L
         return local_loss + global_loss, jepa_loss, kde, meta_loss

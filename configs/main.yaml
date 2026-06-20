@@ -1,5 +1,5 @@
 project:
-  name: jepa-fino-s2026
+  name: fino-a33-treat
   family: nanopath
   recipe_id: dinov2-vits14-reg-jepa-mask10
   output_dir: /data/$USER/nanopath/jepa-fino/s2026
@@ -104,9 +104,14 @@ probe:
 fino:
   enabled: true
   gamma_max: 0.7
+  grad_equalize: true
   discrete:
   - - subtype
     - 1
+  - - cancer
+    - 1
+  - - tss
+    - -1
   continuous:
   - - expr512
     - 1

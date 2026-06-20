@@ -98,3 +98,20 @@ probe:
     pathorob: /data/pathorob
     surgen: /data/surgen
     ucla_lung: /data/ucla-lung
+
+fino:
+  enabled: true
+  gamma_max: 0.7
+  grad_equalize: true
+  discrete:
+  - - subtype
+    - 1
+  - - cancer
+    - 1
+  - - tss
+    - -1
+  continuous:
+  - - expr512
+    - 1
+  - - fga
+    - 1
