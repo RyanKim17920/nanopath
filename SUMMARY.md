@@ -23,7 +23,7 @@ N/A — this is the control branch of the A/B test. The treatment (20260620_jepa
 | **mean (Labless score)** | **0.6479** | **0.6444** | **+0.0035** |
 
 Wandb: https://wandb.ai/ryankim17920-university-of-illinois-urbana-champaign/nanopath/runs/4c3279uf
-Labless: PENDING
+Labless: 6390756087
 
 ## Analysis vs baseline
 
