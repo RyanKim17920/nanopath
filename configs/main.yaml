@@ -2,7 +2,7 @@ project:
   name: fino-a33-treat
   family: nanopath
   recipe_id: dinov2-vits14-reg-jepa-mask10
-  output_dir: /data/$USER/nanopath/jepa-fino/s2026
+  output_dir: /data/$USER/nanopath/20260620-fino-a33-treat
   wandb_dir: /data/$USER/nanopath/wandb
 data:
   dataset_dir: /data/nanopath_parquet
