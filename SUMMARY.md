@@ -216,3 +216,87 @@ Labless: submitted (submission_id=c82603be94)
 | mol-s2027 | `33ae642612` | promising |
 | mol-s2028 | `c82603be94` | promising |
 
+## Confirmation round: best FINO factors (3-seed s2027/s2028)
+
+Two best factors from round-2 sweep confirmed on seeds 2027 and 2028.
+
+### cancer M+ (jobs 100127/100128)
+
+#### conf M+ cancer s2027 (job 100127)
+
+| Probe | This run | Baseline | Delta |
+|-------|----------|----------|-------|
+| linear | 0.7784 | 0.7555 | +0.0229 |
+| knn | 0.7313 | 0.6839 | +0.0474 |
+| 16shot | 0.6531 | 0.5890 | +0.0641 |
+| segmentation | 0.2973 | 0.3089 | -0.0116 |
+| progression | 0.6278 | 0.6418 | -0.0140 |
+| mutation | 0.6216 | 0.5594 | +0.0622 |
+| survival | 0.5963 | 0.5894 | +0.0069 |
+| robustness | 0.8812 | 0.8531 | +0.0281 |
+| **mean (Labless score)** | **0.6484** | **0.6277** | **+0.0207** |
+
+Wandb: https://wandb.ai/ryankim17920-university-of-illinois-urbana-champaign/nanopath/runs/wzqzga3f
+Labless: submitted (submission_id=83135101be)
+
+#### conf M+ cancer s2028 (job 100128)
+
+| Probe | This run | Baseline | Delta |
+|-------|----------|----------|-------|
+| linear | 0.7719 | 0.7555 | +0.0164 |
+| knn | 0.7339 | 0.6839 | +0.0500 |
+| 16shot | 0.6734 | 0.5890 | +0.0844 |
+| segmentation | 0.2994 | 0.3089 | -0.0095 |
+| progression | 0.6603 | 0.6418 | +0.0185 |
+| mutation | 0.6222 | 0.5594 | +0.0628 |
+| survival | 0.5768 | 0.5894 | -0.0126 |
+| robustness | 0.8838 | 0.8531 | +0.0307 |
+| **mean (Labless score)** | **0.6527** | **0.6277** | **+0.0250** |
+
+Wandb: https://wandb.ai/ryankim17920-university-of-illinois-urbana-champaign/nanopath/runs/hx8909rh
+Labless: submitted (submission_id=b766c9cc1f)
+
+### os_status M+ (jobs 100129/100130)
+
+#### conf os_status s2027 (job 100129)
+
+| Probe | This run | Baseline | Delta |
+|-------|----------|----------|-------|
+| linear | 0.7820 | 0.7555 | +0.0265 |
+| knn | 0.7105 | 0.6839 | +0.0266 |
+| 16shot | 0.6400 | 0.5890 | +0.0510 |
+| segmentation | 0.3085 | 0.3089 | -0.0004 |
+| progression | 0.6575 | 0.6418 | +0.0157 |
+| mutation | 0.6127 | 0.5594 | +0.0533 |
+| survival | 0.5638 | 0.5894 | -0.0256 |
+| robustness | 0.8970 | 0.8531 | +0.0439 |
+| **mean (Labless score)** | **0.6465** | **0.6277** | **+0.0188** |
+
+Wandb: https://wandb.ai/ryankim17920-university-of-illinois-urbana-champaign/nanopath/runs/rkbdia4d
+Labless: submitted (submission_id=d643aabd4c)
+
+#### conf os_status s2028 (job 100130)
+
+| Probe | This run | Baseline | Delta |
+|-------|----------|----------|-------|
+| linear | 0.7854 | 0.7555 | +0.0299 |
+| knn | 0.7011 | 0.6839 | +0.0172 |
+| 16shot | 0.6344 | 0.5890 | +0.0454 |
+| segmentation | 0.2985 | 0.3089 | -0.0104 |
+| progression | 0.6682 | 0.6418 | +0.0264 |
+| mutation | 0.6148 | 0.5594 | +0.0554 |
+| survival | 0.5897 | 0.5894 | +0.0003 |
+| robustness | 0.8939 | 0.8531 | +0.0408 |
+| **mean (Labless score)** | **0.6482** | **0.6277** | **+0.0205** |
+
+Wandb: https://wandb.ai/ryankim17920-university-of-illinois-urbana-champaign/nanopath/runs/1c80rdwo
+Labless: submitted (submission_id=d1b84cddca)
+
+### Labless submission IDs (confirmation round)
+
+| Run | Submission ID | Verdict | Mean |
+|-----|--------------|---------|------|
+| conf M+ cancer s2027 (job 100127) | `83135101be` | promising | 0.6484 |
+| conf M+ cancer s2028 (job 100128) | `b766c9cc1f` | promising | 0.6527 |
+| conf os_status s2027 (job 100129) | `d643aabd4c` | promising | 0.6465 |
+| conf os_status s2028 (job 100130) | `d1b84cddca` | promising | 0.6482 |
