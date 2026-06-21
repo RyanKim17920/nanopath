@@ -20,6 +20,7 @@
 
 import hashlib
 import io
+import json
 import random
 from pathlib import Path
 
@@ -111,19 +112,60 @@ class TCGATileDataset(Dataset):
         # the JPEG bytes column stays on disk until __getitem__.
         in_split_shard = []
         in_split_row = []
+        shard_sizes = []
+        # Per-tile slide stem, for building slide-frequency-inverse sampling weights below
+        # (training only; val keeps uniform sampling).
+        in_split_slide = []
         for shard_idx, shard_path in enumerate(self.shards):
             paths = pq.read_table(str(shard_path), columns=["path"], memory_map=True)["path"].to_pylist()
+            shard_sizes.append(len(paths))
             for row_idx, p in enumerate(paths):
                 # XOR with is_train: training keeps tiles where patient_in_val is False,
                 # validation keeps the complement.
                 if patient_in_val(patient_id_from_relpath(p), data["split_seed"], data["val_fraction"]) != is_train:
                     in_split_shard.append(shard_idx)
                     in_split_row.append(row_idx)
+                    in_split_slide.append(p.split("/", 1)[0])
         if not in_split_shard:
             raise ValueError(f"no {'train' if is_train else 'val'} tiles found in {dataset_dir}; check val_fraction={data['val_fraction']}")
         # Two parallel int32 arrays (~32 MB total for 4M tiles) shared COW across DataLoader fork-workers.
         self.shard_of = np.asarray(in_split_shard, dtype=np.int32)
         self.row_of = np.asarray(in_split_row, dtype=np.int32)
+        # Slide-frequency-inverse sampling weights (training split only). Uniform-over-tiles sampling
+        # overrepresents large, dense (tumor-epithelium-heavy) slides relative to small slides that
+        # carry stroma/tumor-bed signal. Setting each tile's visit probability proportional to
+        # (tiles_in_its_slide)^(-alpha) shifts visit mass toward under-represented smaller slides.
+        # alpha=1.0 is the exact inverse-frequency form: weight = 1/tile_count, so each slide's
+        # TOTAL visit mass is equal (per-slide-uniform). This is a steeper re-weighting than the
+        # alpha=0.5 soft-balanced form -- it fully equalizes slide visit mass rather than partially
+        # flattening the bias. alpha=0 recovers the baseline uniform-over-tiles distribution.
+        # Every tile stays reachable (no tile dropped), total pool size preserved, num_samples ==
+        # len(train_ds) keeps epoch length and max_train_samples / tile_presentations / flop budget
+        # invariants identical to the baseline shuffle=True path.
+        self.sample_weights = None
+        if is_train:
+            alpha = float(data.get("slide_balance_alpha", 0.0))
+            if alpha > 0.0:
+                slides_arr = np.asarray(in_split_slide)
+                _, inverse, counts = np.unique(slides_arr, return_inverse=True, return_counts=True)
+                per_slide_count = counts[inverse].astype(np.float64)
+                self.sample_weights = np.power(per_slide_count, -alpha).astype(np.float64)
+        # FINO metadata, built/copied once by prepare.py: per-factor barcode->id (discrete) / barcode->value
+        # (continuous, z-scored) maps. cfg.fino.discrete/continuous select factors and their sign (+ encourage /
+        # - suppress). Loaded once so DataLoader fork-workers share it copy-on-write; train.py masks absent ones.
+        self.fino = (cfg.get("fino") or {}).get("enabled")
+        if self.fino:
+            meta = json.loads((dataset_dir / "fino_meta.json").read_text())
+            self.fino_disc = [f for f, _ in cfg["fino"].get("discrete", [])]
+            self.fino_cont = [f for f, _ in cfg["fino"].get("continuous", [])]
+            # tile_npy maps a discrete factor -> a per-TILE label .npy in shard-concat order (e.g. strong-FM cluster
+            # pseudo-labels): a dense FM-distillation M+ target, looked up by global tile index not patient barcode.
+            tile_npy = cfg["fino"].get("tile_npy", {})
+            self.meta_disc = {f: meta["discrete"][f] for f in self.fino_disc if f not in tile_npy}
+            gidx = np.concatenate([[0], np.cumsum(shard_sizes)])[:-1][self.shard_of] + self.row_of
+            self.tile_label = {f: np.load(dataset_dir / tile_npy[f])[gidx] for f in self.fino_disc if f in tile_npy}
+            self.meta_cont = {f: meta["continuous"][f] for f in self.fino_cont}
+            self.cont_dim = {f: (len(next(iter(v.values()))) if v and isinstance(next(iter(v.values())), list) else 1) for f, v in self.meta_cont.items()}
         mean, std = data["mean"], data["std"]
         self.global_views = int(train["global_views"])
         self.local_views = int(train["local_views"])
@@ -192,10 +234,20 @@ class TCGATileDataset(Dataset):
         # Augmentations are stochastic per view; reproducibility comes from worker seeds.
         global_views = torch.stack([self.global_aug(tile) for _ in range(self.global_views)])
         local_views = torch.stack([self.local_aug(tile) for _ in range(self.local_views)])
+        # FINO per-factor labels for this tile's patient: discrete ids (-1 = missing), one tensor per continuous
+        # factor (scalar or vector; nan-filled if missing). train.py masks missing branches out per-factor.
+        fino_keys = {}
+        if self.fino:
+            fino_keys["meta_disc"] = torch.tensor([int(self.tile_label[f][idx]) if f in self.tile_label else self.meta_disc[f].get(patient_id, -1) for f in self.fino_disc], dtype=torch.int64)
+            for f in self.fino_cont:
+                v = self.meta_cont[f].get(patient_id)
+                v = [float("nan")] * self.cont_dim[f] if v is None else (v if isinstance(v, list) else [v])
+                fino_keys[f"mc_{f}"] = torch.tensor(v, dtype=torch.float32)
         return {
             "global_views": global_views,
             "local_views": local_views,
             "sample_idx": torch.tensor(int(idx), dtype=torch.int64),
             "slide_id": torch.tensor(slide_key, dtype=torch.int64),
             "patient_id": torch.tensor(patient_key, dtype=torch.int64),
+            **fino_keys,
         }

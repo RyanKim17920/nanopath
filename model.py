@@ -9,7 +9,6 @@
 # DINO CLS self-distillation loss. It is intentionally trivial
 # (~15 lines) so we have zero runtime dependency on the dinov2 codebase.
 
-import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -56,6 +55,17 @@ class GradScale(torch.autograd.Function):
     def backward(ctx, g): return g * ctx.scale, None
 
 
+_diags = []
+
+def clear_diags():
+    _diags.clear()
+
+def collect_diags():
+    d = _diags.copy()
+    _diags.clear()
+    return d
+
+
 # Attention with single qkv Linear + F.scaled_dot_product_attention (Flash-2 backend on H100 bf16).
 class Attention(nn.Module):
     def __init__(self, dim, heads):
@@ -64,11 +74,18 @@ class Attention(nn.Module):
         self.qkv = nn.Linear(dim, dim * 3, bias=True)
         self.proj = nn.Linear(dim, dim, bias=True)
 
-    def forward(self, x):
+    def forward(self, x, log_diagnostics=False):
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.heads, C // self.heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
         out = F.scaled_dot_product_attention(q, k, v).transpose(1, 2).reshape(B, N, C)
+        if log_diagnostics:
+            _diags.append({
+                "q_norm": float(q.norm(dim=-1).mean().detach()),
+                "k_norm": float(k.norm(dim=-1).mean().detach()),
+                "v_norm": float(v.norm(dim=-1).mean().detach()),
+                "qk_sim_max": float((q @ k.transpose(-2, -1)).amax(dim=-1).mean().detach()),
+            })
         return self.proj(out)
 
 
@@ -103,8 +120,8 @@ class Block(nn.Module):
 
     def _ff(self, x): return self.mlp(x) if isinstance(self.mlp, SwiGLU) else self.mlp.fc2(F.gelu(self.mlp.fc1(x)))
 
-    def forward(self, x):
-        x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x))))
+    def forward(self, x, log_diagnostics=False):
+        x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x), log_diagnostics=log_diagnostics)))
         x = x + self.drop_path2(self.ls2(self._ff(self.norm2(x))))
         return x
 
@@ -160,8 +177,34 @@ class DinoV2ViT(nn.Module):
     # Returns the dict shape Meta's `forward_features` returns; used by train.py and probe.py.
     # `checkpoint=True` re-runs each block under torch.utils.checkpoint to trade compute for memory;
     # useful when the 1-GPU batch of 128 (2 globals + 8 locals) does not fit in 80 GB.
-    def forward(self, x, masks=None, checkpoint=False):
+    def forward(self, x, masks=None, checkpoint=False, log_diagnostics=False):
         x = self._prepare_tokens(x, masks)
+        if log_diagnostics:
+            clear_diags()
+            _token_norms = []
+            for blk in self.blocks:
+                x = blk(x, log_diagnostics=True)
+                r = self.registers
+                _token_norms.append({
+                    "cls_norm":   float(x[:, 0].norm(dim=-1).mean().detach()),
+                    "reg_norm":   float(x[:, 1:1 + r].norm(dim=-1).mean().detach()) if r > 0 else 0.0,
+                    "patch_norm": float(x[:, 1 + r:].norm(dim=-1).mean().detach()),
+                })
+            x = self.norm(x)
+            result = {
+                "x_norm_clstoken": x[:, 0],
+                "x_norm_regtokens": x[:, 1 : 1 + self.registers],
+                "x_norm_patchtokens": x[:, 1 + self.registers :],
+            }
+            _layers = collect_diags()
+            for i, tn in enumerate(_token_norms):
+                if i < len(_layers):
+                    _layers[i].update(tn)
+            result["_diagnostics"] = _layers
+            result["_final_norm_cls"] = float(x[:, 0].norm(dim=-1).mean().detach())
+            result["_final_norm_reg"] = float(x[:, 1 : 1 + self.registers].norm(dim=-1).mean().detach())
+            result["_final_norm_patch"] = float(x[:, 1 + self.registers :].norm(dim=-1).mean().detach())
+            return result
         for blk in self.blocks:
             if checkpoint and self.training:
                 x = torch.utils.checkpoint.checkpoint(blk, x, use_reentrant=False)
@@ -174,98 +217,13 @@ class DinoV2ViT(nn.Module):
             "x_norm_patchtokens": x[:, 1 + self.registers :],
         }
 
-    # --- Combined Pre-Probe Stack (gated by COMBINED_PREPROBE=1 env var) ---
-    #
-    # Sourced from proven exp_0185 (JBU+dense_fuse) + exp_0179 (multi-depth CLS).
-    #
-    # 1. Multi-Depth CLS Readout (Classification):
-    #    Collect normed CLS from strided transformer depths 4,6,8,11 via
-    #    self.norm (get_intermediate_layers norm=True convention), channel-concat.
-    #    Pure eval-only; train.py never calls probe_features.
-    #    Feature dim widens 384->1536; locked linear/knn/fewshot probes adapt via e.shape[1].
-    #
-    # 2. Dense Fusion + JBU Densifier (Segmentation):
-    #    Fuses last 4 block outputs (channel-concat, 384->1536), keeps register tokens,
-    #    upsamples 16x16->32x32 via Joint Bilateral Upsampler (FeatUp-style).
-    #    Image-guided: spatial Gaussian x range Gaussian on input image structure.
-    #    Parameter-free. MaskTransformer auto-adapts (gs=int(n**0.5), d_encoder dynamic).
-    # --------------------------------------------------------------------------
-
-    CLS_READOUT_DEPTHS = (4, 6, 8, 11)
-    DENSE_FUSE_LAYERS = 4
-    UPSAMPLE_GRID = 32
-    JBU_SIGMA_RANGE = 0.1
-
-    def _jbu_upsample(self, feat_hw, guide_lr, guide_hr):
-        # feat_hw: [B,C,h,w]; guide_lr/guide_hr: [B,1,h,w]/[B,1,H,W] grayscale guidance.
-        # Returns [B,C,H,W] image-guided dense features via bilateral upsampling.
-        B, C, h, w = feat_hw.shape
-        H = Wt = self.UPSAMPLE_GRID
-        # Bilinear feature prior at target grid.
-        up = F.interpolate(feat_hw, size=(H, Wt), mode="bilinear", align_corners=False)
-        # Range term: guidance intensity gap between source and true high-res.
-        guide_src_up = F.interpolate(guide_lr, size=(H, Wt), mode="nearest")
-        gap = (guide_hr - guide_src_up).abs()
-        w_range = torch.exp(-(gap ** 2) / (2.0 * self.JBU_SIGMA_RANGE ** 2))
-        # High-frequency detail: sharpen where guidance indicates boundaries.
-        blur = F.avg_pool2d(F.pad(up, (1, 1, 1, 1), mode="replicate"), kernel_size=3, stride=1)
-        detail = up - blur
-        return up + (1.0 - w_range) * detail
-
-    def _combined_probe_features(self, x):
-        """Multi-Depth CLS Readout: depths 4,6,8,11 -> norm -> channel-concat."""
-        depths = set(d % len(self.blocks) for d in self.CLS_READOUT_DEPTHS)
-        xt = self._prepare_tokens(x)
-        collected = []
-        for i, blk in enumerate(self.blocks):
-            xt = blk(xt)
-            if i in depths:
-                collected.append(self.norm(xt)[:, 0])
-        return torch.cat(collected, dim=-1)
-
-    def _combined_encode_image(self, x, checkpoint=False):
-        """Dense Fusion + JBU: last-4 blocks -> channel-concat -> 32x32 grid."""
-        n_fuse = min(self.DENSE_FUSE_LAYERS, len(self.blocks))
-        take_from = len(self.blocks) - n_fuse
-        B, _, H, W = x.shape
-        h, w = H // self.patch_size, W // self.patch_size
-        # Grayscale guidance from input image, normalized to ~[0,1].
-        guide = x.mean(dim=1, keepdim=True)
-        guide = (guide - guide.amin(dim=(2, 3), keepdim=True)) / (
-            guide.amax(dim=(2, 3), keepdim=True) - guide.amin(dim=(2, 3), keepdim=True) + 1e-6)
-        guide_lr = F.interpolate(guide, size=(h, w), mode="area")
-        guide_hr = F.interpolate(guide, size=(self.UPSAMPLE_GRID, self.UPSAMPLE_GRID), mode="area")
-        xt = self._prepare_tokens(x)
-        collected = []
-        for i, blk in enumerate(self.blocks):
-            if checkpoint and self.training:
-                xt = torch.utils.checkpoint.checkpoint(blk, xt, use_reentrant=False)
-            else:
-                xt = blk(xt)
-            if i >= take_from:
-                xn = self.norm(xt)
-                collected.append(xn[:, 1:])  # drop cls; keep [regs || patches]
-        # Channel-concat fused layers: [B, regs+h*w, C], C = 384*n_fuse.
-        fused = torch.cat(collected, dim=-1)
-        regs = fused[:, : self.registers]
-        patches = fused[:, self.registers :]
-        C = patches.shape[-1]
-        feat_hw = patches.transpose(1, 2).reshape(B, C, h, w)
-        dense = self._jbu_upsample(feat_hw.float(), guide_lr.float(), guide_hr.float())
-        dense = dense.flatten(2).transpose(1, 2).to(fused.dtype)
-        return torch.cat([regs, dense], dim=1)
-
     # Probe contract: encode_image returns [registers || patches] for the seg head;
     # probe_features returns the cls token for classification probes.
     def encode_image(self, x, checkpoint=False):
-        if os.environ.get("COMBINED_PREPROBE") == "1":
-            return self._combined_encode_image(x, checkpoint=checkpoint)
         out = self(x, checkpoint=checkpoint)
         return torch.cat([out["x_norm_regtokens"], out["x_norm_patchtokens"]], dim=1)
 
     def probe_features(self, x):
-        if os.environ.get("COMBINED_PREPROBE") == "1":
-            return self._combined_probe_features(x)
         return self(x)["x_norm_clstoken"]
 
 
