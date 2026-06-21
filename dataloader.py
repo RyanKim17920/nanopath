@@ -130,9 +130,10 @@ class TCGATileDataset(Dataset):
         # FINO metadata, built/copied once by prepare.py: per-factor barcode->id (discrete) / barcode->value
         # (continuous, z-scored) maps. cfg.fino.discrete/continuous select factors and their sign (+ encourage /
         # - suppress). Loaded once so DataLoader fork-workers share it copy-on-write; train.py masks absent ones.
+        self.tile_cont = {}
         self.fino = (cfg.get("fino") or {}).get("enabled")
         if self.fino:
-            meta = json.loads((dataset_dir / "fino_meta.json").read_text())
+            meta = json.loads((dataset_dir / (cfg.get("fino") or {}).get("meta_file", "fino_meta.json")).read_text())
             self.fino_disc = [f for f, _ in cfg["fino"].get("discrete", [])]
             self.fino_cont = [f for f, _ in cfg["fino"].get("continuous", [])]
             # tile_npy maps a discrete factor -> a per-TILE label .npy in shard-concat order (e.g. strong-FM cluster
@@ -143,6 +144,20 @@ class TCGATileDataset(Dataset):
             self.tile_label = {f: np.load(dataset_dir / tile_npy[f])[gidx] for f in self.fino_disc if f in tile_npy}
             self.meta_cont = {f: meta["continuous"][f] for f in self.fino_cont}
             self.cont_dim = {f: (len(next(iter(v.values()))) if v and isinstance(next(iter(v.values())), list) else 1) for f, v in self.meta_cont.items()}
+            # tile_parquet: optional per-tile continuous labels (e.g. tumor fraction),
+            # looked up by manifest path instead of patient barcode. z-scored for grad-equalize parity.
+            tile_parquet = cfg["fino"].get("tile_parquet")
+            if tile_parquet:
+                import pyarrow.parquet as pq
+                _tbl = pq.read_table(tile_parquet, columns=["path", "tumor_fraction"])
+                _p = _tbl["path"].to_pylist(); _v = _tbl["tumor_fraction"].to_pylist()
+                _arr = np.array([x for x in _v if x is not None and not np.isnan(x)], dtype=np.float64)
+                _mu = float(_arr.mean()); _sd = float(max(_arr.std(), 1e-6))
+                _vz = [((x - _mu) / _sd) if (x is not None and not np.isnan(x)) else float("nan") for x in _v]
+                self.tile_cont = {"tumor_frac": dict(zip(_p, _vz))}
+                self.cont_dim = {**self.cont_dim, "tumor_frac": 1}
+                self.meta_cont["tumor_frac"] = {}
+                del _tbl, _p, _v, _vz
         mean, std = data["mean"], data["std"]
         self.global_views = int(train["global_views"])
         self.local_views = int(train["local_views"])
@@ -217,8 +232,12 @@ class TCGATileDataset(Dataset):
         if self.fino:
             fino_keys["meta_disc"] = torch.tensor([int(self.tile_label[f][idx]) if f in self.tile_label else self.meta_disc[f].get(patient_id, -1) for f in self.fino_disc], dtype=torch.int64)
             for f in self.fino_cont:
-                v = self.meta_cont[f].get(patient_id)
-                v = [float("nan")] * self.cont_dim[f] if v is None else (v if isinstance(v, list) else [v])
+                if f in self.tile_cont:
+                    v = self.tile_cont[f].get(rel)
+                    v = [float("nan")] if v is None else [v]
+                else:
+                    v = self.meta_cont[f].get(patient_id)
+                    v = [float("nan")] * self.cont_dim[f] if v is None else (v if isinstance(v, list) else [v])
                 fino_keys[f"mc_{f}"] = torch.tensor(v, dtype=torch.float32)
         return {
             "global_views": global_views,
