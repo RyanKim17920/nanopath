@@ -142,13 +142,12 @@ class TCGATileDataset(Dataset):
             self.meta_disc = {f: meta["discrete"][f] for f in self.fino_disc if f not in tile_npy}
             gidx = np.concatenate([[0], np.cumsum(shard_sizes)])[:-1][self.shard_of] + self.row_of
             self.tile_label = {f: np.load(dataset_dir / tile_npy[f])[gidx] for f in self.fino_disc if f in tile_npy}
-            self.meta_cont = {f: meta["continuous"][f] for f in self.fino_cont}
+            self.meta_cont = {f: meta["continuous"][f] for f in self.fino_cont if f in meta.get("continuous", {})}
             self.cont_dim = {f: (len(next(iter(v.values()))) if v and isinstance(next(iter(v.values())), list) else 1) for f, v in self.meta_cont.items()}
             # tile_parquet: optional per-tile continuous labels (e.g. tumor fraction),
             # looked up by manifest path instead of patient barcode. z-scored for grad-equalize parity.
             tile_parquet = cfg["fino"].get("tile_parquet")
             if tile_parquet:
-                import pyarrow.parquet as pq
                 _tbl = pq.read_table(tile_parquet, columns=["path", "tumor_fraction"])
                 _p = _tbl["path"].to_pylist(); _v = _tbl["tumor_fraction"].to_pylist()
                 _arr = np.array([x for x in _v if x is not None and not np.isnan(x)], dtype=np.float64)
