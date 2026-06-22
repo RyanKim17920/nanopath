@@ -256,7 +256,17 @@ def main():
         p.requires_grad = False
     backbone_activated_params = sum(p.numel() for p in student_backbone.parameters() if p.requires_grad)
     # FINO continuous-factor predictors (phi -> vector regressors); their params join the optimizer.
-    predictors = {f: nn.Sequential(nn.Linear(student_backbone.embed_dim, 512), nn.GELU(), nn.Linear(512, 256), nn.GELU(), nn.Linear(256, fino_meta.get("cont_dim", {}).get(f, 1))).to(device) for f, _ in fino_cont}
+    # fino.cont_head: "mlp" (default, 3-layer MLP) or "linear" (single Linear layer, no activation).
+    _fino_cont_head = fino_cfg.get("cont_head", "mlp") if fino_cfg else "mlp"
+    def _make_cont_predictor(f, cont_dim):
+        if _fino_cont_head == "linear":
+            return nn.Linear(student_backbone.embed_dim, cont_dim)
+        return nn.Sequential(
+            nn.Linear(student_backbone.embed_dim, 512), nn.GELU(),
+            nn.Linear(512, 256), nn.GELU(),
+            nn.Linear(256, cont_dim),
+        )
+    predictors = {f: _make_cont_predictor(f, fino_meta.get("cont_dim", {}).get(f, 1)).to(device) for f, _ in fino_cont}
     # AdamW param groups carry per-parameter LR/WD multipliers (LWD + patch_embed + biases-no-WD).
     param_groups = build_param_groups(student_backbone, student_dino_head, student_predictor, dino_cfg["layerwise_decay"], dino_cfg["patch_embed_lr_mult"])
     if predictors:
@@ -485,11 +495,22 @@ def main():
                 # FINO Eq.3 regresses continuous factors from the RAW backbone CLS; phi_s is L2-normalized (needed only
                 # for the cosine discrete branch and it strips the radial magnitude). raw_cls=True feeds the raw CLS.
                 cls_cont = sg["x_norm_clstoken"].float() if fino_cfg.get("raw_cls") else phi_s
+                # fino.cont_loss: "mse" (default) or "corr" (directional correlation loss).
+                _fino_cont_loss = fino_cfg.get("cont_loss", "mse") if fino_cfg else "mse"
                 for f, sign in fino_cont:
                     val = mc[f].repeat(train_cfg["global_views"], 1); ok = ~torch.isnan(val).any(dim=1)
                     if ok.any():
                         cpred = predictors[f](GradScale.apply(cls_cont[ok], sign * gamma))
-                        terms.append((f, FINO_LAMBDAS.get(f, FINO_LAMBDA_DEFAULT) * F.mse_loss(cpred, val[ok])))
+                        if _fino_cont_loss == "mse":
+                            terms.append((f, FINO_LAMBDAS.get(f, FINO_LAMBDA_DEFAULT) * F.mse_loss(cpred, val[ok])))
+                        else:
+                            # corr: 1 - cosine similarity between centered pred and target (match up to scale/offset)
+                            n_valid = ok.sum()
+                            if n_valid >= 2:
+                                p_c = cpred - cpred.mean(dim=0, keepdim=True)
+                                t_c = val[ok] - val[ok].mean(dim=0, keepdim=True)
+                                cos_sim = (p_c * t_c).sum() / (p_c.norm() * t_c.norm() + 1e-8)
+                                terms.append((f, FINO_LAMBDAS.get(f, FINO_LAMBDA_DEFAULT) * (1.0 - cos_sim)))
                 # FINO grad-cos diagnostic: pairwise cosine of per-branch CLS gradients (read-only, before backward)
                 if FINO_LOG_GRADCOS and step > 0 and step % 50 == 0 and len(terms) >= 2:
                     cls_t = sg["x_norm_clstoken"]
