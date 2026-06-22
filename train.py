@@ -226,7 +226,7 @@ def main():
     fino_cfg = cfg["fino"] if (cfg.get("fino") or {}).get("enabled") else None
     fino_disc = [(f, float(s)) for f, s in fino_cfg.get("discrete", [])] if fino_cfg else []
     fino_cont = [(f, float(s)) for f, s in fino_cfg.get("continuous", [])] if fino_cfg else []
-    fino_meta = json.loads((Path(cfg["data"]["dataset_dir"]) / "fino_meta.json").read_text()) if fino_cfg else {"n": {}, "cont_dim": {}}
+    fino_meta = json.loads((Path(cfg["data"]["dataset_dir"]) / fino_cfg.get("meta_file", "fino_meta.json")).read_text()) if fino_cfg else {"n": {}, "cont_dim": {}}
     # FINO two-phase: freeze the backbone (except patch_embed) for the first this-fraction of the run so the DINO/JEPA
     # heads + metadata prototypes/predictors converge against a fixed target before they steer the encoder. 0 = off.
     freeze_backbone_frac = float(dino_cfg.get("freeze_backbone_fraction", 0.0))
@@ -495,7 +495,7 @@ def main():
                     cls_t = sg["x_norm_clstoken"]
                     factor_grads = {}
                     for fi, (fn, fl) in enumerate(terms):
-                        gr = torch.autograd.grad(fl, cls_t, retain_graph=(fi < len(terms) - 1))[0]
+                        gr = torch.autograd.grad(fl, cls_t, retain_graph=True)[0]
                         factor_grads[fn] = gr.detach().flatten().float()
                     fnames = list(factor_grads.keys())
                     for i in range(len(fnames)):
