@@ -267,6 +267,11 @@ def main():
     # FINO grad-equalisation EMA bank (one running grad-norm per factor); init 1.0 -> s_t~1 early. Not checkpointed
     # (mu=0.99 -> ~100-step memory, re-warms quickly on resume). Used only when fino.grad_equalize is set.
     grad_eq_ema = {f: torch.ones((), device=device) for f, _ in (fino_disc + fino_cont)} if fino_cfg else {}
+    # FINO per-factor lambda: fino.lambdas {factor: float}, fino.lambda_default (float, 0.03)
+    FINO_LAMBDA_DEFAULT = fino_cfg.get("lambda_default", 0.03) if fino_cfg else 0.03
+    FINO_LAMBDAS = fino_cfg.get("lambdas", {}) if fino_cfg else {}
+    # FINO grad-cos diagnostic: fino.log_grad_cos (bool, default false)
+    FINO_LOG_GRADCOS = fino_cfg.get("log_grad_cos", False) if fino_cfg else False
     step = 0
     batch_size = int(train_cfg["batch_size"])
     max_train_samples = int(train_cfg["max_train_samples"])
@@ -439,7 +444,7 @@ def main():
 
     # Compute (dino_loss, jepa_loss, kde) for one batch of (gf, lf) crops with the given masks +
     # schedule values. Used by both the train step and evaluate() (no_grad).
-    def compute_losses(gf, lf, b, masks, mask_idx, mask_w, t_temp, k_scale, ckpt=False, meta=None, cond=None):
+    def compute_losses(gf, lf, b, masks, mask_idx, mask_w, t_temp, k_scale, ckpt=False, meta=None, cond=None, step=0):
         with torch.no_grad():
             t = teacher_backbone(gf)
             t_cls = teacher_dino_head(t["x_norm_clstoken"]).chunk(train_cfg["global_views"])
@@ -470,7 +475,7 @@ def main():
                     lab = md[:, j].repeat(train_cfg["global_views"]); ok = lab >= 0  # repeat, NOT interleave
                     if ok.any():
                         logits = (GradScale.apply(phi_s[ok], sign * gamma) @ protos[f].t()) / 0.023
-                        terms.append((f, 0.03 * F.cross_entropy(logits, lab[ok])))
+                        terms.append((f, FINO_LAMBDAS.get(f, FINO_LAMBDA_DEFAULT) * F.cross_entropy(logits, lab[ok])))
                         with torch.no_grad():
                             pt, lt = phi_t[ok], lab[ok]
                             upd = torch.zeros_like(protos[f]).index_add_(0, lt, pt)
@@ -484,7 +489,20 @@ def main():
                     val = mc[f].repeat(train_cfg["global_views"], 1); ok = ~torch.isnan(val).any(dim=1)
                     if ok.any():
                         cpred = predictors[f](GradScale.apply(cls_cont[ok], sign * gamma))
-                        terms.append((f, 0.03 * F.mse_loss(cpred, val[ok])))
+                        terms.append((f, FINO_LAMBDAS.get(f, FINO_LAMBDA_DEFAULT) * F.mse_loss(cpred, val[ok])))
+                # FINO grad-cos diagnostic: pairwise cosine of per-branch CLS gradients (read-only, before backward)
+                if FINO_LOG_GRADCOS and step > 0 and step % 50 == 0 and len(terms) >= 2:
+                    cls_t = sg["x_norm_clstoken"]
+                    factor_grads = {}
+                    for fi, (fn, fl) in enumerate(terms):
+                        gr = torch.autograd.grad(fl, cls_t, retain_graph=(fi < len(terms) - 1))[0]
+                        factor_grads[fn] = gr.detach().flatten().float()
+                    fnames = list(factor_grads.keys())
+                    for i in range(len(fnames)):
+                        for j in range(i + 1, len(fnames)):
+                            gi, gj = factor_grads[fnames[i]], factor_grads[fnames[j]]
+                            c = (gi * gj).sum() / (gi.norm() * gj.norm() + 1e-12)
+                            print(f"GRADCOS step={step} {fnames[i]}|{fnames[j]}={c.item():.4f}", flush=True)
                 # FINO Alg A.3 per-branch gradient equalisation: rescale each branch by n_bar/EMA(||dL_t/dCLS||) so the
                 # discrete-CE and continuous-MSE gradients reach the encoder at matched magnitudes (detached -> reweight
                 # only; geometric-mean target; no-op for <2 branches). grad_eq_ema = per-factor EMA bank (mu=0.99).
@@ -629,7 +647,7 @@ def main():
                     cond = batch["meta_disc"][:, cond_col].repeat(train_cfg["global_views"]).to(device, non_blocking=True) if jepa_cond else None
                     dino_loss_value, jepa_loss, kde, meta_loss = compute_losses(
                         gf, lf, batch_size, masks, mask_idx, mask_w, teacher_temp, kde_scale,
-                        ckpt=activation_checkpointing, meta=meta, cond=cond,
+                        ckpt=activation_checkpointing, meta=meta, cond=cond, step=completed_step,
                     )
                     total_loss = dino_loss_value + jepa_loss + kde + meta_loss
                 opt.zero_grad(set_to_none=True)
