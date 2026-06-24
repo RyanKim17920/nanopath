@@ -512,12 +512,17 @@ def main():
                                 cos_sim = (p_c * t_c).sum() / (p_c.norm() * t_c.norm() + 1e-8)
                                 terms.append((f, FINO_LAMBDAS.get(f, FINO_LAMBDA_DEFAULT) * (1.0 - cos_sim)))
                 # FINO grad-cos diagnostic: pairwise cosine of per-branch CLS gradients (read-only, before backward)
+                # FINO grad-norm diagnostic: per-branch gradient L2 norm (same autograd pass as above; cheap)
+                # NOTE: fl is the lambda-weighted loss term (lambda * loss_value). The printed norms reflect the
+                # lambda-scaled gradient magnitude -- to compare raw loss magnitudes, divide by the factor's lambda.
                 if FINO_LOG_GRADCOS and step > 0 and step % 50 == 0 and len(terms) >= 2:
                     cls_t = sg["x_norm_clstoken"]
                     factor_grads = {}
                     for fi, (fn, fl) in enumerate(terms):
                         gr = torch.autograd.grad(fl, cls_t, retain_graph=True)[0]
                         factor_grads[fn] = gr.detach().flatten().float()
+                        nrm = gr.norm().item()
+                        print(f"GRADNORM step={step} {fn}={nrm:.4e}", flush=True)
                     fnames = list(factor_grads.keys())
                     for i in range(len(fnames)):
                         for j in range(i + 1, len(fnames)):
