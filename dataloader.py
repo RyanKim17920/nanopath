@@ -113,6 +113,9 @@ class TCGATileDataset(Dataset):
         in_split_shard = []
         in_split_row = []
         shard_sizes = []
+        # Per-tile slide stem, for building slide-frequency-inverse sampling weights below
+        # (training only; val keeps uniform sampling).
+        in_split_slide = []
         for shard_idx, shard_path in enumerate(self.shards):
             paths = pq.read_table(str(shard_path), columns=["path"], memory_map=True)["path"].to_pylist()
             shard_sizes.append(len(paths))
@@ -122,11 +125,31 @@ class TCGATileDataset(Dataset):
                 if patient_in_val(patient_id_from_relpath(p), data["split_seed"], data["val_fraction"]) != is_train:
                     in_split_shard.append(shard_idx)
                     in_split_row.append(row_idx)
+                    in_split_slide.append(p.split("/", 1)[0])
         if not in_split_shard:
             raise ValueError(f"no {'train' if is_train else 'val'} tiles found in {dataset_dir}; check val_fraction={data['val_fraction']}")
         # Two parallel int32 arrays (~32 MB total for 4M tiles) shared COW across DataLoader fork-workers.
         self.shard_of = np.asarray(in_split_shard, dtype=np.int32)
         self.row_of = np.asarray(in_split_row, dtype=np.int32)
+        # Slide-frequency-inverse sampling weights (training split only). Uniform-over-tiles sampling
+        # overrepresents large, dense (tumor-epithelium-heavy) slides relative to small slides that
+        # carry stroma/tumor-bed signal. Setting each tile's visit probability proportional to
+        # (tiles_in_its_slide)^(-alpha) shifts visit mass toward under-represented smaller slides.
+        # alpha=1.0 is the exact inverse-frequency form: weight = 1/tile_count, so each slide's
+        # TOTAL visit mass is equal (per-slide-uniform). This is a steeper re-weighting than the
+        # alpha=0.5 soft-balanced form -- it fully equalizes slide visit mass rather than partially
+        # flattening the bias. alpha=0 recovers the baseline uniform-over-tiles distribution.
+        # Every tile stays reachable (no tile dropped), total pool size preserved, num_samples ==
+        # len(train_ds) keeps epoch length and max_train_samples / tile_presentations / flop budget
+        # invariants identical to the baseline shuffle=True path.
+        self.sample_weights = None
+        if is_train:
+            alpha = float(data.get("slide_balance_alpha", 0.0))
+            if alpha > 0.0:
+                slides_arr = np.asarray(in_split_slide)
+                _, inverse, counts = np.unique(slides_arr, return_inverse=True, return_counts=True)
+                per_slide_count = counts[inverse].astype(np.float64)
+                self.sample_weights = np.power(per_slide_count, -alpha).astype(np.float64)
         # FINO metadata, built/copied once by prepare.py: per-factor barcode->id (discrete) / barcode->value
         # (continuous, z-scored) maps. cfg.fino.discrete/continuous select factors and their sign (+ encourage /
         # - suppress). Loaded once so DataLoader fork-workers share it copy-on-write; train.py masks absent ones.

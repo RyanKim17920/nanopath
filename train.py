@@ -26,7 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import wandb
 import yaml
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch.utils.flop_counter import FlopCounterMode
 
 from dataloader import TCGATileDataset, TILE_SIZE
@@ -399,7 +399,23 @@ def main():
     loader_kwargs = dict(batch_size=batch_size, drop_last=True, num_workers=train_cfg["num_workers"], pin_memory=True,
                          prefetch_factor=train_cfg["prefetch_factor"] if train_cfg["num_workers"] > 0 else None,
                          persistent_workers=train_cfg["persistent_workers"] and train_cfg["num_workers"] > 0)
-    train_loader = DataLoader(train_ds, shuffle=True, **loader_kwargs)
+    # Slide-frequency-inverse sampling (data.slide_balance_alpha > 0): replace uniform shuffle
+    # with a WeightedRandomSampler whose per-tile weights ~ (tiles_in_slide)^(-alpha). At
+    # alpha=1.0 this is exact inverse-frequency: each slide's total visit mass is equal
+    # (per-slide-uniform). Steeper than the alpha=0.5 soft form. num_samples == len(train_ds)
+    # keeps epoch length and max_train_samples / tile_presentations / flop budget invariants
+    # identical to the baseline shuffle=True path.
+    if getattr(train_ds, "sample_weights", None) is not None:
+        sampler_gen = torch.Generator().manual_seed(train_cfg["seed"])
+        train_sampler = WeightedRandomSampler(
+            weights=torch.as_tensor(train_ds.sample_weights, dtype=torch.double),
+            num_samples=len(train_ds),
+            replacement=True,
+            generator=sampler_gen,
+        )
+        train_loader = DataLoader(train_ds, sampler=train_sampler, **loader_kwargs)
+    else:
+        train_loader = DataLoader(train_ds, shuffle=True, **loader_kwargs)
     val_loader = DataLoader(val_ds, shuffle=False, **loader_kwargs)
 
     activation_checkpointing = bool(train_cfg["activation_checkpointing"])
