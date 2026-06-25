@@ -390,7 +390,13 @@ def main():
             source_files.append((path, rel))
     source_snapshot_dir = output_dir / "labless_source"
     if source_snapshot_dir.exists():
-        shutil.rmtree(source_snapshot_dir)
+        # Skip shutil.rmtree on labless_source — can crash on broken symlinks/leftovers from failed runs.
+        # Clean contents manually instead.
+        for child in source_snapshot_dir.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
     for path, rel in source_files:
         target = source_snapshot_dir / rel
         target.parent.mkdir(parents=True, exist_ok=True)
