@@ -298,7 +298,15 @@ def main():
     # Fresh launches always start from scratch and wipe output_dir.
     resume_path = Path(train_cfg["resume"]) if train_cfg["resume"] else None
     if resume_path is None and output_dir.exists():
-        shutil.rmtree(output_dir)
+        # Remove output_dir contents except labless_source (re-created by launcher).
+        # shutil.rmtree crashes on broken symlinks/leftover labless_source from prior failed runs.
+        for child in output_dir.iterdir():
+            if child.name == "labless_source":
+                continue
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     wandb_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = output_dir / "metrics.jsonl"
