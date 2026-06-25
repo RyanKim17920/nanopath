@@ -402,7 +402,10 @@ def main():
             continue  # Skip broken symlinks / missing files (e.g. leftovers from failed runs)
         target = source_snapshot_dir / rel
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, target)
+        try:
+            shutil.copy2(path, target)
+        except (FileNotFoundError, OSError):
+            pass  # Skip files that disappear between check and copy (race / broken symlink)
     wandb_meta = {"entity": wandb_run.entity, "project": "nanopath", "id": wandb_run.id, "name": wandb_name, "url": wandb_run.url,
                   "mode": getattr(wandb_run.settings, "mode", ""), "source_artifact": source_id,
                   "source_dir": str(source_snapshot_dir), "git": {"commit": git_commit, "remote": git_remote}}
