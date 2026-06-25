@@ -146,7 +146,32 @@ class TCGATileDataset(Dataset):
         if is_train:
             alpha = float(data.get("slide_balance_alpha", 0.0))
             if alpha > 0.0:
-                slides_arr = np.asarray(in_split_slide)
+                # Grouping unit for the inverse-frequency weights. "slide" (default) reproduces the
+                # original per-slide behavior exactly. "patient" collapses a slide id to its 12-char
+                # TCGA patient barcode (TCGA-XX-XXXX) so all slides of one patient share visit mass.
+                # "subtype" collapses to the cancer-subtype label from the FINO metadata so visit mass
+                # is balanced across disease subtypes. Any slide that can't be mapped falls back to its
+                # own full slide id (its own group), so unknowns never crash and stay reachable.
+                group = str(data.get("slide_balance_group", "slide"))
+                if group == "patient":
+                    def _group_key(sid):
+                        return sid[:12] if (len(sid) >= 12 and sid.startswith("TCGA")) else sid
+                    keys = [_group_key(s) for s in in_split_slide]
+                elif group == "subtype":
+                    # Reuse the FINO meta dict if it's already loaded below; otherwise load the same
+                    # fino_meta.json (or fino.meta_file) the FINO branch reads. subtype is keyed by the
+                    # 12-char patient barcode -> integer subtype id.
+                    _meta_file = (cfg.get("fino") or {}).get("meta_file", "fino_meta.json")
+                    _meta = json.loads((dataset_dir / _meta_file).read_text())
+                    _sub = (_meta.get("discrete") or {}).get("subtype", {})
+                    def _group_key(sid):
+                        bc = sid[:12] if (len(sid) >= 12 and sid.startswith("TCGA")) else sid
+                        v = _sub.get(bc)
+                        return f"subtype:{v}" if v is not None else sid
+                    keys = [_group_key(s) for s in in_split_slide]
+                else:  # "slide" (default) -- original behavior
+                    keys = in_split_slide
+                slides_arr = np.asarray(keys)
                 _, inverse, counts = np.unique(slides_arr, return_inverse=True, return_counts=True)
                 per_slide_count = counts[inverse].astype(np.float64)
                 self.sample_weights = np.power(per_slide_count, -alpha).astype(np.float64)
