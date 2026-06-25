@@ -169,6 +169,25 @@ class TCGATileDataset(Dataset):
                         v = _sub.get(bc)
                         return f"subtype:{v}" if v is not None else sid
                     keys = [_group_key(s) for s in in_split_slide]
+                elif group == "combined":
+                    # Dual weighting: weight = (patient_count * slide_count)^(-alpha)
+                    # Each tile gets a combined weight that accounts for both patient-level
+                    # and slide-level frequency, balancing across both dimensions simultaneously.
+                    def _patient_key(sid):
+                        return sid[:12] if (len(sid) >= 12 and sid.startswith("TCGA")) else sid
+                    patient_keys = [_patient_key(s) for s in in_split_slide]
+                    # Per-slide counts
+                    slides_arr_s = np.asarray(in_split_slide)
+                    _, inv_s, cnt_s = np.unique(slides_arr_s, return_inverse=True, return_counts=True)
+                    per_slide_count_s = cnt_s[inv_s].astype(np.float64)
+                    # Per-patient counts
+                    slides_arr_p = np.asarray(patient_keys)
+                    _, inv_p, cnt_p = np.unique(slides_arr_p, return_inverse=True, return_counts=True)
+                    per_patient_count_p = cnt_p[inv_p].astype(np.float64)
+                    # Combined weight: product of inverse frequencies
+                    combined_count = per_slide_count_s * per_patient_count_p
+                    self.sample_weights = np.power(combined_count, -alpha).astype(np.float64)
+                    continue  # Skip the rest of the grouping block, weights already set
                 else:  # "slide" (default) -- original behavior
                     keys = in_split_slide
                 slides_arr = np.asarray(keys)
