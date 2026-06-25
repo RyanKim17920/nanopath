@@ -398,6 +398,8 @@ def main():
             else:
                 child.unlink(missing_ok=True)
     for path, rel in source_files:
+        if not path.exists():
+            continue  # Skip broken symlinks / missing files (e.g. leftovers from failed runs)
         target = source_snapshot_dir / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, target)
