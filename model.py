@@ -9,6 +9,7 @@
 # DINO CLS self-distillation loss. It is intentionally trivial
 # (~15 lines) so we have zero runtime dependency on the dinov2 codebase.
 
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -217,14 +218,186 @@ class DinoV2ViT(nn.Module):
             "x_norm_patchtokens": x[:, 1 + self.registers :],
         }
 
-    # Probe contract: encode_image returns [registers || patches] for the seg head;
-    # probe_features returns the cls token for classification probes.
-    def encode_image(self, x, checkpoint=False):
-        out = self(x, checkpoint=checkpoint)
-        return torch.cat([out["x_norm_regtokens"], out["x_norm_patchtokens"]], dim=1)
 
     def probe_features(self, x):
-        return self(x)["x_norm_clstoken"]
+        # OVFX_CLS selects the classification readout (pre-probe baseline sweep).
+        # Unset/"concat" = the current default (multi-depth CLS-concat).
+        #   plain            -> final CLS only (x_norm_clstoken)
+        #   concat           -> multi-depth CLS-concat (CLS_DEPTHS), L2-normed per depth
+        #   meanpatch        -> [final CLS || mean patch token], each L2-normed
+        #   concat_meanpatch -> multi-depth CLS-concat || mean patch token
+        #   quantile         -> [CLS || per-dim Q0.1,Q0.5,Q0.9 of patches] (heterogeneity)
+        #   normweight       -> [CLS || norm-weighted patch mean] (high-norm = informative)
+        #   gram             -> [CLS || compact second-order sketch of patch features] (texture)
+        #   concat_quantile  -> CLS-stack || per-dim Q0.1,Q0.5,Q0.9 of patches
+        #   concat_normweight -> CLS-stack || norm-weighted patch mean
+        #   concat_gram      -> CLS-stack || compact second-order sketch of patch features
+        # All are fixed feed-forward functions of frozen features (no per-image opt,
+        # no eval-set stats) -> legal under the eval-fairness rule.
+        mode = os.environ.get("OVFX_CLS", "plain")
+        if mode == "plain":
+            return self(x)["x_norm_clstoken"]
+        if mode == "meanpatch":
+            out = self(x)
+            cls = F.normalize(out["x_norm_clstoken"], dim=-1, p=2)
+            mp = F.normalize(out["x_norm_patchtokens"].mean(dim=1), dim=-1, p=2)
+            return torch.cat([cls, mp], dim=-1)  # [B, 2 * embed_dim]
+        if mode == "quantile":
+            out = self(x)
+            cls = F.normalize(out["x_norm_clstoken"], dim=-1, p=2)
+            p = out["x_norm_patchtokens"]  # [B, n_patch, D]
+            qs = torch.tensor([0.1, 0.5, 0.9], device=p.device, dtype=p.dtype)
+            q = torch.quantile(p, qs, dim=1)  # [3, B, D]
+            parts = [cls] + [F.normalize(q[i], dim=-1, p=2) for i in range(q.shape[0])]
+            return torch.cat(parts, dim=-1)  # [B, 4 * embed_dim]
+        if mode == "normweight":
+            out = self(x)
+            cls = F.normalize(out["x_norm_clstoken"], dim=-1, p=2)
+            p = out["x_norm_patchtokens"]  # [B, n_patch, D]
+            w = p.norm(dim=-1, keepdim=True)  # [B, n_patch, 1]
+            wp = (p * w).sum(dim=1) / w.sum(dim=1).clamp_min(1e-6)  # [B, D]
+            return torch.cat([cls, F.normalize(wp, dim=-1, p=2)], dim=-1)
+        if mode == "gram":
+            out = self(x)
+            cls = F.normalize(out["x_norm_clstoken"], dim=-1, p=2)
+            p = out["x_norm_patchtokens"]  # [B, n_patch, D]
+            # Compact second-order: project patches by a FIXED random R [D, m] (seed 0,
+            # deterministic), then per-projected-dim second moment E[(Rp)^2] over patches.
+            # Each projected dim mixes original feature pairs, so the energies capture
+            # cross-feature (texture) structure the mean discards. Bounded m -> usable dim.
+            D = p.shape[-1]; m = 96
+            gen = torch.Generator(device=p.device).manual_seed(0)
+            R = torch.randn(D, m, generator=gen, device=p.device, dtype=p.dtype) / (D ** 0.5)
+            z = p @ R  # [B, n_patch, m]
+            second = (z * z).mean(dim=1)  # [B, m] diagonal of the projected gram
+            return torch.cat([cls, F.normalize(second, dim=-1, p=2)], dim=-1)
+        if mode == "concat_quantile":
+            caps = self._forward_intermediates(x, self.CLS_DEPTHS)
+            feats = [F.normalize(caps[d][:, 0], dim=-1, p=2) for d in self.CLS_DEPTHS]
+            p = self(x)["x_norm_patchtokens"]  # [B, n_patch, D]
+            qs = torch.tensor([0.1, 0.5, 0.9], device=p.device, dtype=p.dtype)
+            q = torch.quantile(p, qs, dim=1)  # [3, B, D]
+            feats = feats + [F.normalize(q[i], dim=-1, p=2) for i in range(q.shape[0])]
+            return torch.cat(feats, dim=-1)  # [B, (4+3) * embed_dim]
+        if mode == "concat_normweight":
+            caps = self._forward_intermediates(x, self.CLS_DEPTHS)
+            feats = [F.normalize(caps[d][:, 0], dim=-1, p=2) for d in self.CLS_DEPTHS]
+            p = self(x)["x_norm_patchtokens"]  # [B, n_patch, D]
+            w = p.norm(dim=-1, keepdim=True)  # [B, n_patch, 1]
+            wp = (p * w).sum(dim=1) / w.sum(dim=1).clamp_min(1e-6)  # [B, D]
+            feats = feats + [F.normalize(wp, dim=-1, p=2)]
+            return torch.cat(feats, dim=-1)  # [B, (4+1) * embed_dim]
+        if mode == "concat_gram":
+            caps = self._forward_intermediates(x, self.CLS_DEPTHS)
+            feats = [F.normalize(caps[d][:, 0], dim=-1, p=2) for d in self.CLS_DEPTHS]
+            p = self(x)["x_norm_patchtokens"]  # [B, n_patch, D]
+            D = p.shape[-1]; m = 96
+            gen = torch.Generator(device=p.device).manual_seed(0)
+            R = torch.randn(D, m, generator=gen, device=p.device, dtype=p.dtype) / (D ** 0.5)
+            z = p @ R  # [B, n_patch, m]
+            second = (z * z).mean(dim=1)  # [B, m] diagonal of the projected gram
+            feats = feats + [F.normalize(second, dim=-1, p=2)]
+            return torch.cat(feats, dim=-1)  # [B, (4*embed_dim + 96)]
+        caps = self._forward_intermediates(x, self.CLS_DEPTHS)
+        feats = [F.normalize(caps[d][:, 0], dim=-1, p=2) for d in self.CLS_DEPTHS]
+        if mode == "concat_meanpatch":
+            mp = F.normalize(self(x)["x_norm_patchtokens"].mean(dim=1), dim=-1, p=2)
+            feats = feats + [mp]
+        return torch.cat(feats, dim=-1)  # [B, k * embed_dim]
+
+    # SEGMENTATION / dense readout used by the seg probes via encode_image.
+    # 1. Concatenate the LAST FOUR normalized block patch-token outputs.
+    # 2. KEEP the register tokens (returned ahead of the patch tokens, matching
+    #    the [registers || patches] contract probe.py slices with [:, registers:]).
+    # 3. Reshape patch tokens to a denser 32x32 grid (densify the native 16x16
+    #    patch grid via the JBU upsample below).
+    # 4. Apply a lightweight JBU-style (joint bilateral upsampling) image-guided
+    #    upsample/sharpen, guide = the input image. No eval-set statistics.
+    SEG_DEPTHS = (9, 10, 11, 12)
+    SEG_GRID = 32
+
+    def encode_image(self, x, checkpoint=False):
+        # `checkpoint` is accepted for call-site compatibility; the dense readout
+        # is eval-only (no_grad in probe.py) so activation checkpointing is moot.
+        # OVFX_SEG selects the segmentation readout (pre-probe baseline sweep).
+        # Unset/"jbu_last4" = the current default (JBU on last-4-block concat).
+        #   plain     -> [registers || patch tokens], native grid, NO JBU
+        #   jbu_last1 -> JBU densify of the LAST block only (no depth concat)
+        #   jbu_last4 -> JBU densify of the last-4-block patch concat (default)
+        seg_mode = os.environ.get("OVFX_SEG", "jbu_last4")
+        if seg_mode == "plain":
+            out = self(x, checkpoint=checkpoint)
+            return torch.cat([out["x_norm_regtokens"], out["x_norm_patchtokens"]], dim=1)
+        depth = len(self.blocks)
+        last_four = (depth,) if seg_mode == "jbu_last1" else tuple(depth - k for k in (3, 2, 1, 0))
+        caps = self._forward_intermediates(x, last_four)
+        # Per-depth final-LayerNorm of each captured block, then concat patch
+        # tokens over depth -> [B, n_patch, 4 * embed_dim]. Registers handled below.
+        reg = self.registers
+        patch_per_depth, reg_per_depth = [], []
+        for d in last_four:
+            normed = self.norm(caps[d])
+            reg_per_depth.append(normed[:, 1 : 1 + reg])
+            patch_per_depth.append(normed[:, 1 + reg :])
+        patches = torch.cat(patch_per_depth, dim=-1)   # [B, n_patch, 4C]
+        regs = torch.cat(reg_per_depth, dim=-1)        # [B, registers, 4C]
+
+        # Native patch grid (square) -> dense 32x32 grid via image-guided JBU.
+        B, n_patch, C = patches.shape
+        g = int(round(n_patch ** 0.5))
+        assert g * g == n_patch, f"patch count {n_patch} is not square"
+        grid = patches.transpose(1, 2).reshape(B, C, g, g)  # [B, 4C, g, g]
+        dense = self._jbu_upsample(grid, x, self.SEG_GRID)  # [B, 4C, 32, 32]
+        dense = dense.flatten(2).transpose(1, 2)            # [B, 32*32, 4C] = [B, 1024, 4C]
+
+        # [registers || dense-patches]; probe.py drops the first `registers`
+        # tokens, leaving 1024 = 32*32 patch tokens for the seg head's gs=32 reshape.
+        return torch.cat([regs, dense], dim=1)
+
+    # Lightweight JBU (Joint Bilateral Upsampling) variant. Bilinearly upsample
+    # the low-res patch-feature grid to the target grid, then run ONE guided
+    # pass: the guide is the input image downsampled to the target grid, and each
+    # output cell is a fixed-3x3-neighborhood blend of the upsampled features
+    # weighted by (a) a fixed spatial Gaussian and (b) a range Gaussian on guide-
+    # intensity similarity. Sigmas are fixed constants -> no eval-set statistics,
+    # the guide is purely the per-image input. Bounded: single pass, 3x3 kernel.
+    SIGMA_SPATIAL = 1.0
+    SIGMA_RANGE = 0.1
+
+    def _jbu_upsample(self, feat_grid, image, out_size):
+        B, C, _, _ = feat_grid.shape
+        # (1) bilinear upsample features to the dense target grid.
+        feat_up = F.interpolate(feat_grid, size=(out_size, out_size), mode="bilinear", align_corners=False)
+        # (2) build the guide: input image -> grayscale -> downsample to target grid.
+        guide = image.mean(dim=1, keepdim=True)  # [B,1,H,W] per-image, no dataset stats
+        guide = F.interpolate(guide, size=(out_size, out_size), mode="bilinear", align_corners=False)  # [B,1,32,32]
+
+        # Fixed 3x3 spatial weights (Gaussian over a unit-spaced grid).
+        offs = [-1, 0, 1]
+        device, dtype = feat_up.device, feat_up.dtype
+        spatial = torch.tensor(
+            [[(dy * dy + dx * dx) for dx in offs] for dy in offs],
+            device=device, dtype=torch.float32,
+        )
+        spatial = torch.exp(-spatial / (2.0 * self.SIGMA_SPATIAL ** 2))  # [3,3]
+
+        # (3) one guided-filter pass: accumulate neighbor features weighted by
+        # spatial * range(guide-intensity similarity). Reflect-pad so border
+        # cells keep full 3x3 support without dataset-dependent fill.
+        g_pad = F.pad(guide, (1, 1, 1, 1), mode="reflect")     # [B,1,34,34]
+        f_pad = F.pad(feat_up, (1, 1, 1, 1), mode="reflect")   # [B,C,34,34]
+        out = torch.zeros_like(feat_up)
+        wsum = torch.zeros(B, 1, out_size, out_size, device=device, dtype=dtype)
+        sr2 = 2.0 * self.SIGMA_RANGE ** 2
+        for iy, dy in enumerate(offs):
+            for ix, dx in enumerate(offs):
+                g_shift = g_pad[:, :, 1 + dy : 1 + dy + out_size, 1 + dx : 1 + dx + out_size]
+                f_shift = f_pad[:, :, 1 + dy : 1 + dy + out_size, 1 + dx : 1 + dx + out_size]
+                rng = torch.exp(-((g_shift - guide) ** 2) / sr2)         # [B,1,32,32]
+                w = (spatial[iy, ix].to(dtype) * rng)                    # [B,1,32,32]
+                out = out + w * f_shift
+                wsum = wsum + w
+        return out / wsum.clamp_min(1e-6)
 
 
 # Strict-load Meta's pretrained weights for the model's declared variant.
