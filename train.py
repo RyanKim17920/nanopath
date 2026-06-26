@@ -408,6 +408,7 @@ def main():
             pass
     source_snapshot_dir.mkdir(parents=True, exist_ok=True)
     for path, rel in source_files:
+        # path.exists() follows symlinks → returns False for broken ones → safe skip
         if not path.exists():
             continue
         target = source_snapshot_dir / rel
@@ -415,8 +416,10 @@ def main():
             target.parent.mkdir(parents=True, exist_ok=True)
         except (FileNotFoundError, NotADirectoryError, OSError):
             continue
+        # shutil.copy2 crashes on NFS/shared FS: copystat() utime fails on dest.
+        # Use copy() for content-only, best-effort snapshot (metadata not needed for provenance).
         try:
-            shutil.copy2(path, target)
+            shutil.copy(str(path), str(target))
         except (FileNotFoundError, OSError):
             pass
     wandb_meta = {"entity": wandb_run.entity, "project": "nanopath", "id": wandb_run.id, "name": wandb_name, "url": wandb_run.url,
