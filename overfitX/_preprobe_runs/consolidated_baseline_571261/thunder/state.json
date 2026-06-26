@@ -1,0 +1,30 @@
+{
+  "version": 12,
+  "family": "nanopath",
+  "count": 1,
+  "logged_results": [],
+  "classification_datasets": [
+    "bracs",
+    "break_his",
+    "mhist",
+    "pcam"
+  ],
+  "segmentation_datasets": [
+    "pannuke",
+    "monusac",
+    "consep"
+  ],
+  "slide_datasets": [
+    "ucla_lung"
+  ],
+  "auc_datasets": [
+    "surgen"
+  ],
+  "survival_datasets": [
+    "leopard_bcr",
+    "cptac_pda_os"
+  ],
+  "robustness_datasets": [
+    "pathorob"
+  ]
+}

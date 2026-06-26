@@ -219,6 +219,19 @@ class DinoV2ViT(nn.Module):
         }
 
 
+    def _forward_intermediates(self, x, depths):
+        x_tokens = self._prepare_tokens(x)
+        want = set(depths)
+        captured = {}
+        for i, blk in enumerate(self.blocks):
+            x_tokens = blk(x_tokens)
+            d = i + 1  # 1-indexed depth
+            if d in want:
+                captured[d] = x_tokens
+        return captured
+
+    CLS_DEPTHS = (4, 6, 8, 11)
+
     def probe_features(self, x):
         # OVFX_CLS selects the classification readout (pre-probe baseline sweep).
         # Unset/"concat" = the current default (multi-depth CLS-concat).
@@ -271,9 +284,13 @@ class DinoV2ViT(nn.Module):
             z = p @ R  # [B, n_patch, m]
             second = (z * z).mean(dim=1)  # [B, m] diagonal of the projected gram
             return torch.cat([cls, F.normalize(second, dim=-1, p=2)], dim=-1)
+        if mode == "concat_fino":
+            caps = self._forward_intermediates(x, self.CLS_DEPTHS)
+            feats = [F.normalize(self.norm(caps[d])[:, 0], dim=-1, p=2) for d in self.CLS_DEPTHS]
+            return torch.cat(feats, dim=-1)  # [B, 4 * embed_dim]
         if mode == "concat_quantile":
             caps = self._forward_intermediates(x, self.CLS_DEPTHS)
-            feats = [F.normalize(caps[d][:, 0], dim=-1, p=2) for d in self.CLS_DEPTHS]
+            feats = [F.normalize(self.norm(caps[d])[:, 0], dim=-1, p=2) for d in self.CLS_DEPTHS]
             p = self(x)["x_norm_patchtokens"]  # [B, n_patch, D]
             qs = torch.tensor([0.1, 0.5, 0.9], device=p.device, dtype=p.dtype)
             q = torch.quantile(p, qs, dim=1)  # [3, B, D]
@@ -281,7 +298,7 @@ class DinoV2ViT(nn.Module):
             return torch.cat(feats, dim=-1)  # [B, (4+3) * embed_dim]
         if mode == "concat_normweight":
             caps = self._forward_intermediates(x, self.CLS_DEPTHS)
-            feats = [F.normalize(caps[d][:, 0], dim=-1, p=2) for d in self.CLS_DEPTHS]
+            feats = [F.normalize(self.norm(caps[d])[:, 0], dim=-1, p=2) for d in self.CLS_DEPTHS]
             p = self(x)["x_norm_patchtokens"]  # [B, n_patch, D]
             w = p.norm(dim=-1, keepdim=True)  # [B, n_patch, 1]
             wp = (p * w).sum(dim=1) / w.sum(dim=1).clamp_min(1e-6)  # [B, D]
@@ -289,7 +306,7 @@ class DinoV2ViT(nn.Module):
             return torch.cat(feats, dim=-1)  # [B, (4+1) * embed_dim]
         if mode == "concat_gram":
             caps = self._forward_intermediates(x, self.CLS_DEPTHS)
-            feats = [F.normalize(caps[d][:, 0], dim=-1, p=2) for d in self.CLS_DEPTHS]
+            feats = [F.normalize(self.norm(caps[d])[:, 0], dim=-1, p=2) for d in self.CLS_DEPTHS]
             p = self(x)["x_norm_patchtokens"]  # [B, n_patch, D]
             D = p.shape[-1]; m = 96
             gen = torch.Generator(device=p.device).manual_seed(0)
@@ -298,8 +315,40 @@ class DinoV2ViT(nn.Module):
             second = (z * z).mean(dim=1)  # [B, m] diagonal of the projected gram
             feats = feats + [F.normalize(second, dim=-1, p=2)]
             return torch.cat(feats, dim=-1)  # [B, (4*embed_dim + 96)]
+        if mode == "cls_attn_depth":
+            caps = self._forward_intermediates(x, self.CLS_DEPTHS)
+            d_cls = [self.norm(caps[d])[:, 0] for d in self.CLS_DEPTHS]  # each [B, D]
+            final_cls = self(x)["x_norm_clstoken"]
+            # cosine sim between each depth CLS and final CLS as attention weight
+            sims = torch.stack([F.cosine_similarity(c, final_cls, dim=-1) for c in d_cls], dim=-1)  # [B, K]
+            w = F.softmax(sims / 0.1, dim=-1)  # [B, K]
+            # concat all CLS tokens weighted by attention
+            d_stack = torch.stack(d_cls, dim=1)  # [B, K, D]
+            attn_weighted = (d_stack * w.unsqueeze(-1)).sum(dim=1)  # [B, D]
+            return torch.cat([final_cls, attn_weighted], dim=-1)
+        if mode == "cls_depth_stats":
+            caps = self._forward_intermediates(x, self.CLS_DEPTHS)
+            d_cls = [self.norm(caps[d])[:, 0] for d in self.CLS_DEPTHS]  # each [B, D]
+            d_stack = torch.stack(d_cls, dim=1)  # [B, K, D]
+            # per-dimension mean and std across depths
+            d_mean = d_stack.mean(dim=1)  # [B, D]
+            d_std = d_stack.std(dim=1)    # [B, D]
+            return torch.cat([F.normalize(d_mean, dim=-1, p=2), F.normalize(d_std, dim=-1, p=2)], dim=-1)
+        if mode == "patch_magnitude":
+            out = self(x)
+            cls = F.normalize(out["x_norm_clstoken"], dim=-1, p=2)
+            p = out["x_norm_patchtokens"]  # [B, n_patch, D]
+            mag = p.norm(dim=-1, keepdim=True)  # [B, n_patch, 1]
+            mag_w = mag / mag.sum(dim=1, keepdim=True).clamp_min(1e-6)
+            mp = (p * mag_w).sum(dim=1)  # [B, D]
+            return torch.cat([cls, F.normalize(mp, dim=-1, p=2)], dim=-1)
+        if mode == "reg_mean":
+            out = self(x)
+            cls = F.normalize(out["x_norm_clstoken"], dim=-1, p=2)
+            reg = out["x_norm_regtokens"].mean(dim=1)  # [B, D]
+            return torch.cat([cls, F.normalize(reg, dim=-1, p=2)], dim=-1)
         caps = self._forward_intermediates(x, self.CLS_DEPTHS)
-        feats = [F.normalize(caps[d][:, 0], dim=-1, p=2) for d in self.CLS_DEPTHS]
+        feats = [F.normalize(self.norm(caps[d])[:, 0], dim=-1, p=2) for d in self.CLS_DEPTHS]
         if mode == "concat_meanpatch":
             mp = F.normalize(self(x)["x_norm_patchtokens"].mean(dim=1), dim=-1, p=2)
             feats = feats + [mp]
@@ -328,6 +377,45 @@ class DinoV2ViT(nn.Module):
         if seg_mode == "plain":
             out = self(x, checkpoint=checkpoint)
             return torch.cat([out["x_norm_regtokens"], out["x_norm_patchtokens"]], dim=1)
+        if seg_mode == "seg_early_blocks":
+            depth = len(self.blocks)
+            # early blocks (1,3) + last 4 blocks
+            early = tuple(k for k in (1, 3) if k <= depth)
+            late = tuple(depth - k for k in (3, 2, 1, 0))
+            all_depths = early + late
+            caps = self._forward_intermediates(x, all_depths)
+            reg = self.registers
+            patch_parts, reg_parts = [], []
+            for d in all_depths:
+                normed = self.norm(caps[d])
+                reg_parts.append(normed[:, 1 : 1 + reg])
+                patch_parts.append(normed[:, 1 + reg :])
+            patches = torch.cat(patch_parts, dim=-1)
+            regs = torch.cat(reg_parts, dim=-1)
+            B, n_patch, C = patches.shape
+            g = int(round(n_patch ** 0.5))
+            grid = patches.transpose(1, 2).reshape(B, C, g, g)
+            dense = self._jbu_upsample(grid, x, self.SEG_GRID)
+            dense = dense.flatten(2).transpose(1, 2)
+            return torch.cat([regs, dense], dim=1)
+        if seg_mode == "seg_jbu_last2":
+            depth = len(self.blocks)
+            last_two = tuple(depth - k for k in (1, 0))
+            caps = self._forward_intermediates(x, last_two)
+            reg = self.registers
+            patch_parts, reg_parts = [], []
+            for d in last_two:
+                normed = self.norm(caps[d])
+                reg_parts.append(normed[:, 1 : 1 + reg])
+                patch_parts.append(normed[:, 1 + reg :])
+            patches = torch.cat(patch_parts, dim=-1)
+            regs = torch.cat(reg_parts, dim=-1)
+            B, n_patch, C = patches.shape
+            g = int(round(n_patch ** 0.5))
+            grid = patches.transpose(1, 2).reshape(B, C, g, g)
+            dense = self._jbu_upsample(grid, x, self.SEG_GRID)
+            dense = dense.flatten(2).transpose(1, 2)
+            return torch.cat([regs, dense], dim=1)
         depth = len(self.blocks)
         last_four = (depth,) if seg_mode == "jbu_last1" else tuple(depth - k for k in (3, 2, 1, 0))
         caps = self._forward_intermediates(x, last_four)
