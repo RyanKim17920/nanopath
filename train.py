@@ -881,6 +881,7 @@ def main():
         "family": cfg["project"]["family"],
         "recipe_id": cfg["project"]["recipe_id"],
         "config_path": cfg["config_path"],
+        "resumed_from": str(resume_path) if resume_path else None,
         "wandb": wandb_meta,
         "slurm_job_id": slurm_job_id,
         "backbone_activated_params": backbone_activated_params,
