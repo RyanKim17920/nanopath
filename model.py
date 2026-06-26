@@ -225,9 +225,8 @@ class DinoV2ViT(nn.Module):
         captured = {}
         for i, blk in enumerate(self.blocks):
             x_tokens = blk(x_tokens)
-            d = i + 1  # 1-indexed depth
-            if d in want:
-                captured[d] = x_tokens
+            if i in want:  # 0-indexed: matches deployed probe.py
+                captured[i] = x_tokens
         return captured
 
     CLS_DEPTHS = (4, 6, 8, 11)
@@ -362,7 +361,7 @@ class DinoV2ViT(nn.Module):
     #    patch grid via the JBU upsample below).
     # 4. Apply a lightweight JBU-style (joint bilateral upsampling) image-guided
     #    upsample/sharpen, guide = the input image. No eval-set statistics.
-    SEG_DEPTHS = (9, 10, 11, 12)
+    SEG_DEPTHS = (8, 9, 10, 11)  # 0-indexed last four blocks
     SEG_GRID = 32
 
     def encode_image(self, x, checkpoint=False):
@@ -379,9 +378,9 @@ class DinoV2ViT(nn.Module):
             return torch.cat([out["x_norm_regtokens"], out["x_norm_patchtokens"]], dim=1)
         if seg_mode == "seg_early_blocks":
             depth = len(self.blocks)
-            # early blocks (1,3) + last 4 blocks
-            early = tuple(k for k in (1, 3) if k <= depth)
-            late = tuple(depth - k for k in (3, 2, 1, 0))
+            # early blocks at 0-indexed indices (0,2) = old (1,3) 1-indexed + last 4 blocks (8,9,10,11)
+            early = tuple(k for k in (0, 2) if k < depth)
+            late = tuple(depth - 1 - k for k in (3, 2, 1, 0))
             all_depths = early + late
             caps = self._forward_intermediates(x, all_depths)
             reg = self.registers
@@ -400,7 +399,7 @@ class DinoV2ViT(nn.Module):
             return torch.cat([regs, dense], dim=1)
         if seg_mode == "seg_jbu_last2":
             depth = len(self.blocks)
-            last_two = tuple(depth - k for k in (1, 0))
+            last_two = tuple(depth - 1 - k for k in (1, 0))
             caps = self._forward_intermediates(x, last_two)
             reg = self.registers
             patch_parts, reg_parts = [], []
@@ -417,7 +416,8 @@ class DinoV2ViT(nn.Module):
             dense = dense.flatten(2).transpose(1, 2)
             return torch.cat([regs, dense], dim=1)
         depth = len(self.blocks)
-        last_four = (depth,) if seg_mode == "jbu_last1" else tuple(depth - k for k in (3, 2, 1, 0))
+        # 0-indexed: last block = depth-1, last four = depth-4 .. depth-1
+        last_four = (depth - 1,) if seg_mode == "jbu_last1" else tuple(depth - 1 - k for k in (3, 2, 1, 0))
         caps = self._forward_intermediates(x, last_four)
         # Per-depth final-LayerNorm of each captured block, then concat patch
         # tokens over depth -> [B, n_patch, 4 * embed_dim]. Registers handled below.
