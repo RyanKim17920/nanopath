@@ -389,23 +389,36 @@ def main():
             rel = path.relative_to(repo_dir)
             source_files.append((path, rel))
     source_snapshot_dir = output_dir / "labless_source"
-    if source_snapshot_dir.exists():
-        # Skip shutil.rmtree on labless_source — can crash on broken symlinks/leftovers from failed runs.
-        # Clean contents manually instead.
-        for child in source_snapshot_dir.iterdir():
-            if child.is_dir():
-                shutil.rmtree(child, ignore_errors=True)
+    # Bulletproof cleanup of labless_source — can be stale file, broken symlinks, or partial dirs
+    try:
+        if source_snapshot_dir.exists():
+            for child in source_snapshot_dir.iterdir():
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    child.unlink(missing_ok=True)
+    except (NotADirectoryError, PermissionError, OSError):
+        # labless_source is a stale file or unreadable; nuke it entirely
+        try:
+            if source_snapshot_dir.is_file():
+                source_snapshot_dir.unlink(missing_ok=True)
             else:
-                child.unlink(missing_ok=True)
+                shutil.rmtree(source_snapshot_dir, ignore_errors=True)
+        except OSError:
+            pass
+    source_snapshot_dir.mkdir(parents=True, exist_ok=True)
     for path, rel in source_files:
         if not path.exists():
-            continue  # Skip broken symlinks / missing files (e.g. leftovers from failed runs)
+            continue
         target = source_snapshot_dir / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        except (FileNotFoundError, NotADirectoryError, OSError):
+            continue
         try:
             shutil.copy2(path, target)
         except (FileNotFoundError, OSError):
-            pass  # Skip files that disappear between check and copy (race / broken symlink)
+            pass
     wandb_meta = {"entity": wandb_run.entity, "project": "nanopath", "id": wandb_run.id, "name": wandb_name, "url": wandb_run.url,
                   "mode": getattr(wandb_run.settings, "mode", ""), "source_artifact": source_id,
                   "source_dir": str(source_snapshot_dir), "git": {"commit": git_commit, "remote": git_remote}}
