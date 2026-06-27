@@ -2,7 +2,9 @@
   "version": 12,
   "family": "nanopath",
   "count": 1,
-  "logged_results": [],
+  "logged_results": [
+    "/admin/home/ryan.kim/nanopath/base-models/nanopath-jepa/overfitX/batch05/evo-o-batch5-preprobe/overfitX/_preprobe_runs/consolidated_baseline_571261/thunder/results/step_0007812.json"
+  ],
   "classification_datasets": [
     "bracs",
     "break_his",

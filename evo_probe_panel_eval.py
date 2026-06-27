@@ -195,10 +195,14 @@ def _run_probe_only(entry: dict) -> dict:
         )
 
     # Per-checkpoint scratch output dir inside the worktree (kept out of the repo tree root).
+    # Namespace by EVO_EXPERIMENT_ID so concurrent readout evals do NOT share/rmtree the same
+    # per-checkpoint scratch dir (prior shared-dir collisions raced rmtree+write -> FileNotFound /
+    # "Directory not empty" crashes). Each readout job now owns its own subtree.
+    exp_ns = re.sub(r"[^A-Za-z0-9_.-]+", "_", os.environ.get("EVO_EXPERIMENT_ID", "default"))
     tag = re.sub(r"[^A-Za-z0-9_.-]+", "_", f"{entry.get('role','ckpt')}_{entry.get('seed','x')}")
-    out_dir = WORKTREE / "overfitX" / "_preprobe_runs" / tag
+    out_dir = WORKTREE / "overfitX" / "_preprobe_runs" / exp_ns / tag
     if out_dir.exists():
-        shutil.rmtree(out_dir)
+        shutil.rmtree(out_dir, ignore_errors=True)
     resume_cfg = _write_resume_config(ckpt, out_dir)
 
     env = dict(os.environ)

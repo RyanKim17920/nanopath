@@ -1,0 +1,32 @@
+{
+  "version": 12,
+  "family": "nanopath",
+  "count": 1,
+  "logged_results": [
+    "/admin/home/ryan.kim/nanopath/base-models/nanopath-jepa/overfitX/batch05/evo-o-batch5-preprobe/overfitX/_preprobe_runs/pp_reg_mean_jbu_last4/consolidated_baseline_571261/thunder/results/step_0007812.json"
+  ],
+  "classification_datasets": [
+    "bracs",
+    "break_his",
+    "mhist",
+    "pcam"
+  ],
+  "segmentation_datasets": [
+    "pannuke",
+    "monusac",
+    "consep"
+  ],
+  "slide_datasets": [
+    "ucla_lung"
+  ],
+  "auc_datasets": [
+    "surgen"
+  ],
+  "survival_datasets": [
+    "leopard_bcr",
+    "cptac_pda_os"
+  ],
+  "robustness_datasets": [
+    "pathorob"
+  ]
+}

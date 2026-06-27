@@ -315,16 +315,22 @@ class DinoV2ViT(nn.Module):
             feats = feats + [F.normalize(second, dim=-1, p=2)]
             return torch.cat(feats, dim=-1)  # [B, (4*embed_dim + 96)]
         if mode == "cls_attn_depth":
+            # Build ON TOP of concat_fino: keep the full 4-depth CLS concat (preserves
+            # the depth diversity knn/16shot exploit) AND append an input-dependent
+            # attention-weighted depth summary (the non-linear cross-depth feature that
+            # lifted progression/survival in the collapse-to-2D variant).
             caps = self._forward_intermediates(x, self.CLS_DEPTHS)
             d_cls = [self.norm(caps[d])[:, 0] for d in self.CLS_DEPTHS]  # each [B, D]
             final_cls = self(x)["x_norm_clstoken"]
+            # concat_fino base (L2-normed per depth) -- identical to mode "concat_fino"
+            feats = [F.normalize(c, dim=-1, p=2) for c in d_cls]  # 4 x [B, D]
             # cosine sim between each depth CLS and final CLS as attention weight
             sims = torch.stack([F.cosine_similarity(c, final_cls, dim=-1) for c in d_cls], dim=-1)  # [B, K]
             w = F.softmax(sims / 0.1, dim=-1)  # [B, K]
-            # concat all CLS tokens weighted by attention
             d_stack = torch.stack(d_cls, dim=1)  # [B, K, D]
             attn_weighted = (d_stack * w.unsqueeze(-1)).sum(dim=1)  # [B, D]
-            return torch.cat([final_cls, attn_weighted], dim=-1)
+            feats = feats + [F.normalize(attn_weighted, dim=-1, p=2)]  # 5th block
+            return torch.cat(feats, dim=-1)  # [B, 5 * D]
         if mode == "cls_depth_stats":
             caps = self._forward_intermediates(x, self.CLS_DEPTHS)
             d_cls = [self.norm(caps[d])[:, 0] for d in self.CLS_DEPTHS]  # each [B, D]
@@ -333,19 +339,65 @@ class DinoV2ViT(nn.Module):
             d_mean = d_stack.mean(dim=1)  # [B, D]
             d_std = d_stack.std(dim=1)    # [B, D]
             return torch.cat([F.normalize(d_mean, dim=-1, p=2), F.normalize(d_std, dim=-1, p=2)], dim=-1)
+        if mode == "cls_depth_stats_concat":
+            # Build-on-top of cls_depth_stats (trial 1). Trial-1 finding: the depth-MEAN
+            # DILUTES the discriminative final-block CLS (linear 0.733 vs concat_fino 0.773),
+            # while the cross-depth STD added complementary heterogeneity (survival/knn gains).
+            # So KEEP the full concat_fino depth stack [4*D] (preserves classification) and
+            # ADD ONLY the per-dim STD across depths [D] (the genuinely new signal). Same
+            # self.norm + [:,0] convention as concat_fino -> verbatim-faithful to probe.py.
+            caps = self._forward_intermediates(x, self.CLS_DEPTHS)
+            d_cls = [self.norm(caps[d])[:, 0] for d in self.CLS_DEPTHS]  # each [B, D]
+            feats = [F.normalize(c, dim=-1, p=2) for c in d_cls]          # concat_fino stack
+            d_stack = torch.stack(d_cls, dim=1)  # [B, K, D]
+            d_std = d_stack.std(dim=1)           # [B, D] per-dim cross-depth std
+            feats = feats + [F.normalize(d_std, dim=-1, p=2)]
+            return torch.cat(feats, dim=-1)  # [B, (4+1) * embed_dim]
         if mode == "patch_magnitude":
+            # GeM (generalized-mean) pooling of patch tokens, concatenated onto the
+            # VALIDATED concat_fino multi-depth CLS base (the "concat_meanpatch family").
+            # GeM_p(x) = (mean_i x_i^p)^(1/p): p=1 -> mean, p->inf -> max. p>1 emphasizes the
+            # most-activated (salient) patches per channel -- a salience pool that the mean /
+            # norm-weight / quantile pools (all already tested, all diluted concat_fino) do NOT
+            # capture. Signed power preserves the sign of LayerNorm'd (negative-capable) features;
+            # per-image, feed-forward, no eval-set stats -> legal under the eval-fairness rule.
+            # Tunables (env): OVFX_GEM_P exponent (default 3), OVFX_GEM_ALPHA scale on the
+            # L2-normed pool block to control dilution of the classification heads (default 1),
+            # OVFX_GEM_BASE cls base ("concat" multi-depth default | "single" final CLS only).
+            gem_p = float(os.environ.get("OVFX_GEM_P", "3.0"))
+            gem_alpha = float(os.environ.get("OVFX_GEM_ALPHA", "1.0"))
+            gem_base = os.environ.get("OVFX_GEM_BASE", "concat")
             out = self(x)
-            cls = F.normalize(out["x_norm_clstoken"], dim=-1, p=2)
             p = out["x_norm_patchtokens"]  # [B, n_patch, D]
-            mag = p.norm(dim=-1, keepdim=True)  # [B, n_patch, 1]
-            mag_w = mag / mag.sum(dim=1, keepdim=True).clamp_min(1e-6)
-            mp = (p * mag_w).sum(dim=1)  # [B, D]
-            return torch.cat([cls, F.normalize(mp, dim=-1, p=2)], dim=-1)
+            sp = p.sign() * p.abs().clamp_min(1e-6).pow(gem_p)  # signed power [B, n_patch, D]
+            m = sp.mean(dim=1)  # [B, D]
+            gem = m.sign() * m.abs().clamp_min(1e-6).pow(1.0 / gem_p)  # [B, D]
+            pool = gem_alpha * F.normalize(gem, dim=-1, p=2)  # [B, D]
+            if gem_base == "single":
+                cls = F.normalize(out["x_norm_clstoken"], dim=-1, p=2)
+                return torch.cat([cls, pool], dim=-1)  # [B, 2 * embed_dim]
+            caps = self._forward_intermediates(x, self.CLS_DEPTHS)
+            feats = [F.normalize(self.norm(caps[d])[:, 0], dim=-1, p=2) for d in self.CLS_DEPTHS]
+            return torch.cat(feats + [pool], dim=-1)  # [B, (4 + 1) * embed_dim]
         if mode == "reg_mean":
             out = self(x)
             cls = F.normalize(out["x_norm_clstoken"], dim=-1, p=2)
             reg = out["x_norm_regtokens"].mean(dim=1)  # [B, D]
             return torch.cat([cls, F.normalize(reg, dim=-1, p=2)], dim=-1)
+        if mode == "concat_reg_mean":
+            # Build ON TOP of concat_fino (trial-2). Trial-1 finding (bare reg_mean = [final CLS ||
+            # mean register], score 0.6527, delta -0.0036): dropping the multi-depth concat HURT
+            # classification (16shot -0.025, linear/knn -0.010 each) but the mean-register block
+            # WON survival (+0.0165) and progression (+0.0047). So KEEP the full concat_fino
+            # 4-depth CLS stack [4*D] (recovers the classification richness) and APPEND ONLY the
+            # L2-normed mean register-token block [D] (the genuinely new slide-level signal).
+            # Same self.norm + [:,0] convention as concat_fino -> verbatim-faithful to probe.py;
+            # mean over register tokens is per-image, feed-forward, no eval-set stats -> legal.
+            caps = self._forward_intermediates(x, self.CLS_DEPTHS)
+            feats = [F.normalize(self.norm(caps[d])[:, 0], dim=-1, p=2) for d in self.CLS_DEPTHS]
+            reg = self(x)["x_norm_regtokens"].mean(dim=1)  # [B, D]
+            feats = feats + [F.normalize(reg, dim=-1, p=2)]
+            return torch.cat(feats, dim=-1)  # [B, (4+1) * embed_dim]
         caps = self._forward_intermediates(x, self.CLS_DEPTHS)
         feats = [F.normalize(self.norm(caps[d])[:, 0], dim=-1, p=2) for d in self.CLS_DEPTHS]
         if mode == "concat_meanpatch":

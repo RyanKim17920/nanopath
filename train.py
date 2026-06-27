@@ -347,9 +347,21 @@ def main():
         line.strip() for line in (repo_dir / ".gitignore").read_text().splitlines()
         if line.strip() and not line.startswith("#")
     ] + [".git/", "baselines/", "slurm/", "AGENTS.md", "CLAUDE.md"]
-    ignored_roots = [output_dir.resolve(), wandb_dir.resolve()]
+    # Exclude the preprobe scratch tree from the source snapshot: it contains prior runs'
+    # labless_source/ snapshots, and walking into it makes each snapshot recursively copy the
+    # previous one (observed 129 nested labless_source dirs -> rmtree/copy crashes). It is scratch,
+    # never source.
+    ignored_roots = [output_dir.resolve(), wandb_dir.resolve(),
+                     (repo_dir / "overfitX" / "_preprobe_runs").resolve()]
+
+    # Name-based exclude (defense-in-depth vs recursive labless_source/_preprobe_runs
+    # self-nesting). The root-based check below can slip when repo_dir/symlink resolution
+    # differs from the walked path; excluding by NAME can never recurse. See overfitX/tools/nesting_guard.sh.
+    NESTING_EXCLUDE_NAMES = {"labless_source", "_preprobe_runs", ".evo", "wandb", "__pycache__"}
 
     def artifact_ignored(path):
+        if path.name in NESTING_EXCLUDE_NAMES:
+            return True
         if any(path.resolve().is_relative_to(root) for root in ignored_roots):
             return True
         rel_path = path.relative_to(repo_dir)

@@ -1,0 +1,73 @@
+{
+  "_comment": "Standing baseline-readout panel at panel_version 0. Opus-judged winner: plain CLS (final) + JBU-last4 dense-fusion seg. Multi-depth CLS concat is HARMFUL (-0.0149 panel). Source: batch01/cf_cls_single_result.json (OVFX_CLS=plain + OVFX_SEG=jbu_last4; 3 panel checkpoints).",
+  "panel_version": 0,
+  "readout": "plain CLS (final) + JBU-last4 dense-fusion seg",
+  "checkpoint_scores": [
+    {
+      "checkpoint": "/data/ryan.kim/nanopath/overfitX-batch01/deploy_seed220794/latest.pt",
+      "role": "consolidated_baseline",
+      "exp_id": "deploy_seed220794",
+      "seed": 220794,
+      "readout": "plain CLS (final) + JBU-last4 dense-fusion seg",
+      "probes": {
+        "linear": 0.7824740477326885,
+        "knn": 0.7291870659631332,
+        "16shot": 0.6442121034253513,
+        "segmentation": 0.32751746584895775,
+        "progression": 0.6523002933821647,
+        "mutation": 0.6303965657199488,
+        "survival": 0.5937350351152211,
+        "robustness": 0.8959924804451281
+      },
+      "mean": 0.6583
+    },
+    {
+      "checkpoint": "/data/ryan.kim/nanopath/overfitX-batch01/exp_0010/latest.pt",
+      "role": "frontier_checkpoint",
+      "exp_id": "exp_0010",
+      "seed": 220794,
+      "readout": "plain CLS (final) + JBU-last4 dense-fusion seg",
+      "probes": {
+        "linear": 0.7824740477326885,
+        "knn": 0.7291870659631332,
+        "16shot": 0.6442121034253513,
+        "segmentation": 0.32751746584895775,
+        "progression": 0.6523002933821647,
+        "mutation": 0.6303965657199488,
+        "survival": 0.5937350351152211,
+        "robustness": 0.8959924804451281
+      },
+      "mean": 0.6601
+    },
+    {
+      "checkpoint": "/data/ryan.kim/nanopath/overfitX-batch01/deploy_seed314159/latest.pt",
+      "role": "reseed_anchor",
+      "exp_id": "deploy_seed314159",
+      "seed": 314159,
+      "readout": "plain CLS (final) + JBU-last4 dense-fusion seg",
+      "probes": {
+        "linear": 0.7824740477326885,
+        "knn": 0.7291870659631332,
+        "16shot": 0.6442121034253513,
+        "segmentation": 0.32751746584895775,
+        "progression": 0.6523002933821647,
+        "mutation": 0.6303965657199488,
+        "survival": 0.5937350351152211,
+        "robustness": 0.8959924804451281
+      },
+      "mean": 0.6525
+    }
+  ],
+  "panel_mean": {
+    "linear": 0.7824740477326885,
+    "knn": 0.7291870659631332,
+    "16shot": 0.6442121034253513,
+    "segmentation": 0.32751746584895775,
+    "progression": 0.6523002933821647,
+    "mutation": 0.6303965657199488,
+    "survival": 0.5937350351152211,
+    "robustness": 0.8959924804451281,
+    "mean": 0.657
+  },
+  "panel_mean_overall": 0.657
+}

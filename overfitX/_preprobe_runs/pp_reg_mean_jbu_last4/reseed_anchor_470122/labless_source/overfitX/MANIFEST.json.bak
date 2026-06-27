@@ -1,0 +1,515 @@
+{
+  "cycle": 2,
+  "phase": "step0_reseed",
+  "stop": false,
+  "repo": "/admin/home/ryan.kim/nanopath/base-models/nanopath-jepa",
+  "train_seed": 613547,
+  "tracks": {
+    "train": {
+      "workspace": "/admin/home/ryan.kim/nanopath/base-models/nanopath-jepa/overfitX/batch02/evo-o-batch2-train",
+      "committed_since_reset": 0,
+      "stall": 0,
+      "trial_budget": 60
+    },
+    "preprobe": {
+      "workspace": "/admin/home/ryan.kim/nanopath/base-models/nanopath-jepa/overfitX/batch02/evo-o-batch2-preprobe",
+      "committed_since_reset": 0,
+      "stall": 0,
+      "baseline_readout_panel": "/admin/home/ryan.kim/nanopath/base-models/nanopath-jepa/overfitX/batch02/baseline_readout_panel.json",
+      "trial_budget": 20
+    }
+  },
+  "panel": "/admin/home/ryan.kim/nanopath/base-models/nanopath-jepa/overfitX/batch02/panel.json",
+  "raw_baseline_commit": "76769ac32629cdbd8d315fd08d71241fc64aafb9",
+  "preprobe_stack_commit": "1357a1065443c3e8d6494becb4c2fd265174a95b",
+  "best": {
+    "train_raw": 0.6568069603500934,
+    "frontier_checkpoint_exp_id": "deploy_seed613547",
+    "preprobe_panel_mean": null,
+    "matched_deploy": null
+  },
+  "round0_invalid": {
+    "status": "INVALID",
+    "reason": "All round-0 training results built on mismatched plainer bases (jf_se_g05, jepa_base) not the deploy recipe jf_i_hed07; no valid paired control; ran through a broken smoke-gate. Scores archived in batch01/_invalid_round0/.",
+    "impl_scores_discarded": {
+      "gram": 0.6479,
+      "outpaint": 0.6459,
+      "xmag": 0.6507,
+      "novelreseed_exp_0041": 0.634,
+      "novelreseed_exp_0057": 0.648
+    },
+    "archive_path": "overfitX/batch01/_invalid_round0"
+  },
+  "seed_baseline": {
+    "seed": 220794,
+    "recipe": "jf_i_hed07",
+    "raw_final_probe_score": 0.6561,
+    "plain_jepa_historical": 0.6444
+  },
+  "logging_standard": "overfitX/batch02/conventions_logging.json (v1.0.0, verified uniform)",
+  "preprobe_eval_status": "FIXED 2026-06-18 (panel eval produces real scores)",
+  "trigger": {
+    "count": 60,
+    "stall_window": 8,
+    "stall_eps": 0.006
+  },
+  "carried_directions": {
+    "validated": [],
+    "developing": [
+      {
+        "direction": "n2_lr_wd_rewarm",
+        "mechanism": "late single-cycle LR re-warm + WD bump",
+        "family": "schedule_nonadditive"
+      },
+      {
+        "direction": "d6_lateramp_mcr2",
+        "mechanism": "back-half ramp-gated MCR2 coding-rate anti-collapse aux",
+        "family": "objective_lateramp"
+      },
+      {
+        "direction": "d3_severed_xmag",
+        "mechanism": "cross-magnification dense-consistency aux on SEVERED/detached branch",
+        "family": "objective_severed"
+      },
+      {
+        "direction": "d16_teacher_traj",
+        "mechanism": "teacher-trajectory reshape: late temp-anneal x EMA-mobility",
+        "family": "schedule_nonadditive_teacher"
+      },
+      {
+        "direction": "d17_lineage_optimizer_phase",
+        "mechanism": "optimizer slow-beta2 x WD-phase (family)",
+        "family": "optimizer_nonadditive"
+      }
+    ],
+    "dead_pruned": [
+      {
+        "exp_id": "exp_0108",
+        "mechanism": "stain",
+        "reseed_score": 0.6488,
+        "track": "train"
+      },
+      {
+        "exp_id": "exp_0162",
+        "mechanism": "crop/cluster-warm",
+        "reseed_score": 0.6452,
+        "track": "train"
+      },
+      {
+        "exp_id": "exp_0121",
+        "mechanism": "colorjitter",
+        "reseed_score": 0.648,
+        "track": "train"
+      },
+      {
+        "exp_id": "exp_0010_d17",
+        "mechanism": "optimizer slow-beta2 WD-phase (param)",
+        "reseed_score": 0.6442,
+        "track": "train",
+        "cycle_killed": 1,
+        "reason": "d17 flipped -0.0005@721379; param is seed-noise"
+      },
+      {
+        "exp_id": "exp_0017_d24",
+        "mechanism": "KDE-survival-carrier schedule",
+        "reseed_score": 0.6441,
+        "track": "train",
+        "cycle_killed": 1,
+        "reason": "d24 flipped -0.0006@721379; selection-overfit"
+      },
+      {
+        "exp_id": "exp_0207",
+        "mechanism": "3block_cls_concat",
+        "reseed_score": null,
+        "track": "preprobe",
+        "cycle_killed": 1,
+        "reason": "plain CLS beats concat +0.0027; seed-fragile"
+      },
+      {
+        "exp_id": "exp_0504_d23",
+        "mechanism": "FINO-deep additive",
+        "reseed_score": null,
+        "track": "train",
+        "cycle_killed": 1,
+        "reason": "-0.0096 deep additive dilution"
+      },
+      {
+        "exp_id": "exp_0501_d10",
+        "mechanism": "FeatUp primary",
+        "reseed_score": null,
+        "track": "train",
+        "cycle_killed": 1,
+        "reason": "-0.0133 additive-into-backbone"
+      },
+      {
+        "exp_id": "exp_0503_d7",
+        "mechanism": "cross-mag primary",
+        "reseed_score": null,
+        "track": "train",
+        "cycle_killed": 1,
+        "reason": "-0.0078; dominated by severed d3"
+      },
+      {
+        "exp_id": "exp_0502_d25",
+        "mechanism": "frozen-FINO warmup",
+        "reseed_score": null,
+        "track": "train",
+        "cycle_killed": 1,
+        "reason": "-0.0143 disrupts co-training"
+      },
+      {
+        "exp_id": "exp_0014_d11",
+        "mechanism": "patch-decorrelation",
+        "reseed_score": null,
+        "track": "train",
+        "cycle_killed": 1,
+        "reason": "-0.0363 harmful; retune still -0.0146"
+      },
+      {
+        "exp_id": "combo_d17d24",
+        "mechanism": "schedule-mod combo",
+        "reseed_score": null,
+        "track": "train",
+        "cycle_killed": 1,
+        "reason": "schedule-mods do NOT stack"
+      },
+      {
+        "exp_id": "combo_d17d16",
+        "mechanism": "schedule-mod combo",
+        "reseed_score": null,
+        "track": "train",
+        "cycle_killed": 1,
+        "reason": "schedule-mods do NOT stack"
+      }
+    ],
+    "novel_portfolio_file": "overfitX/batch02/novel_directions.json",
+    "novel_flagship_tier1": [
+      "Multi-Depth CLS Concatenation",
+      "TRUE Seg/CLS Gradient Decoupling",
+      "GRAM ANCHORING",
+      "GENBIO PATHFM OUTPAINTING-JEPA",
+      "CROSS-MAGNIFICATION INVERSE-SCALE",
+      "FINO Site-Deconfounding GRL"
+    ],
+    "novel_tier2": [
+      "iBOT Dual Continuous-Discrete Masked Prediction",
+      "High-Token-Value JEPA Block Masking",
+      "MCR2 Coding-Rate Anti-Collapse",
+      "Prototype Diversity (ME-MAX Assignment-Entropy)",
+      "RKD Relational Distillation (External Teacher)",
+      "Register Tokens + KDE Spread",
+      "UDI-Style Stratified Multimodal CLS Target",
+      "Tissue-Density Input Sampling",
+      "LAWA Late-Averaged Weight Snapshots",
+      "Sinkhorn-Knopp Doubly-Stochastic Centering"
+    ],
+    "novel_tier3": [
+      "Partial-Norm CLS Target Geometry",
+      "Soft Slide-Balanced Sampling",
+      "Soft-Equivariance Initialization",
+      "SIGReg CLS-Uniformity",
+      "JEPA Mask-Difficulty Swap",
+      "Asymmetric Augmentation Severity",
+      "DINO CLS Loss-Weight Back-Half Decay"
+    ],
+    "novel_needs_impl": [
+      "TRUE Seg/CLS Gradient Decoupling",
+      "GRAM ANCHORING",
+      "GENBIO PATHFM OUTPAINTING-JEPA",
+      "CROSS-MAGNIFICATION INVERSE-SCALE",
+      "High-Token-Value JEPA Block Masking",
+      "MCR2 Coding-Rate Anti-Collapse",
+      "Prototype Diversity (ME-MAX Assignment-Entropy)",
+      "Tissue-Density Input Sampling",
+      "LAWA Late-Averaged Weight Snapshots",
+      "Soft Slide-Balanced Sampling",
+      "Soft-Equivariance Initialization",
+      "SIGReg CLS-Uniformity",
+      "JEPA Mask-Difficulty Swap",
+      "Asymmetric Augmentation Severity",
+      "DINO CLS Loss-Weight Back-Half Decay",
+      "FINO Site-Deconfounding GRL",
+      "iBOT Dual Continuous-Discrete Masked Prediction",
+      "RKD Relational Distillation (External Teacher)"
+    ],
+    "novel_has_branch": [
+      "Multi-Depth CLS Concatenation::exp_0322",
+      "High-Token-Value JEPA Block Masking::exp_0121",
+      "MCR2 Coding-Rate Anti-Collapse::exp_0159",
+      "Prototype Diversity (ME-MAX Assignment-Entropy)::exp_0041",
+      "Register Tokens + KDE Spread::exp_0057",
+      "UDI-Style Stratified Multimodal CLS Target::exp_0102",
+      "LAWA Late-Averaged Weight Snapshots::exp_0152",
+      "Sinkhorn-Knopp Doubly-Stochastic Centering::exp_0104",
+      "Partial-Norm CLS Target Geometry::exp_0100",
+      "Soft Slide-Balanced Sampling::exp_0141",
+      "Soft-Equivariance Initialization::exp_0004",
+      "SIGReg CLS-Uniformity::exp_0148",
+      "JEPA Mask-Difficulty Swap::exp_0088",
+      "DINO CLS Loss-Weight Back-Half Decay::exp_0124"
+    ],
+    "novel_branch_verified": true,
+    "track_train": [
+      "TRUE Seg/CLS Gradient Decoupling",
+      "GRAM ANCHORING",
+      "GENBIO PATHFM OUTPAINTING-JEPA",
+      "CROSS-MAGNIFICATION INVERSE-SCALE",
+      "FINO Site-Deconfounding GRL",
+      "iBOT Dual Continuous-Discrete Masked Prediction",
+      "High-Token-Value JEPA Block Masking",
+      "Prototype Diversity (ME-MAX Assignment-Entropy)",
+      "RKD Relational Distillation (External Teacher)",
+      "Register Tokens + KDE Spread",
+      "UDI-Style Stratified Multimodal CLS Target",
+      "Tissue-Density Input Sampling",
+      "LAWA Late-Averaged Weight Snapshots",
+      "Soft Slide-Balanced Sampling",
+      "Soft-Equivariance Initialization",
+      "JEPA Mask-Difficulty Swap",
+      "Asymmetric Augmentation Severity",
+      "DINO CLS Loss-Weight Back-Half Decay",
+      "MCR2 Coding-Rate Anti-Collapse",
+      "SIGReg CLS-Uniformity",
+      "Partial-Norm CLS Target Geometry"
+    ],
+    "track_preprobe": [
+      "Multi-Depth CLS Concatenation",
+      "Sinkhorn-Knopp Doubly-Stochastic Centering"
+    ],
+    "track_ambiguous": [],
+    "legality_gate": "clear",
+    "legality_audit_file": "overfitX/batch01/legality_audit.json",
+    "legality_constraints": [
+      {
+        "name": "GRAM ANCHORING",
+        "constraint": "Gram matrix must be computed on training batches only \u2014 never fit or accumulated over an eval set."
+      },
+      {
+        "name": "MCR2 Coding-Rate Anti-Collapse",
+        "constraint": "MUST be training-time loss only; preprobe reading collapses to eval-set whitening (illegal)."
+      },
+      {
+        "name": "SIGReg CLS-Uniformity",
+        "constraint": "MUST be training-time loss only; preprobe reading requires fitting target statistics on eval set (illegal)."
+      }
+    ],
+    "cycle2_novel_directions": [
+      {
+        "name": "Lookahead optimizer (reimplemented correctly)",
+        "category": "optimizer",
+        "train_or_preprobe": "train"
+      },
+      {
+        "name": "EMA/teacher momentum gentle re-anneal",
+        "category": "schedule",
+        "train_or_preprobe": "train"
+      },
+      {
+        "name": "Severed FeatUp dense-consistency",
+        "category": "objective",
+        "train_or_preprobe": "train"
+      },
+      {
+        "name": "Severed + late-ramp FINO survival carrier",
+        "category": "objective",
+        "train_or_preprobe": "train"
+      },
+      {
+        "name": "PCGrad / cosine-veto conflict-gated aux",
+        "category": "optimizer",
+        "train_or_preprobe": "train"
+      },
+      {
+        "name": "AnyUp seg feature upsampler as preprobe readout",
+        "category": "architecture",
+        "train_or_preprobe": "preprobe"
+      },
+      {
+        "name": "LAWA late-averaged weight snapshots",
+        "category": "optimizer",
+        "train_or_preprobe": "train"
+      }
+    ]
+  },
+  "graduated": [
+    {
+      "label": "dino",
+      "track": "train",
+      "kind": "training_coupled",
+      "graduated_cycle": 0,
+      "baked_commit": "59d4196",
+      "note": "core DINOv2 self-distillation objective"
+    },
+    {
+      "label": "jepa",
+      "track": "train",
+      "kind": "training_coupled",
+      "graduated_cycle": 0,
+      "baked_commit": "59d4196",
+      "note": "core JEPA latent-prediction objective \u2014 permanent base"
+    },
+    {
+      "label": "kde",
+      "track": "train",
+      "kind": "training_coupled",
+      "graduated_cycle": 0,
+      "baked_commit": "59d4196",
+      "note": "CLS-hypersphere uniformity regularizer (base)"
+    },
+    {
+      "label": "fino",
+      "track": "train",
+      "kind": "training_coupled",
+      "graduated_cycle": 0,
+      "baked_commit": "59d4196",
+      "note": "FINO metadata-contrastive CLS auxiliary \u2014 proven stable, permanent base"
+    }
+  ],
+  "stack_members": [
+    {
+      "label": "exp_0114_multi_layer_dense_fusion_seg",
+      "kind": "readout",
+      "clean_cycles": 1,
+      "status": "validated"
+    },
+    {
+      "label": "exp_0167_jbu_densifier",
+      "kind": "readout",
+      "clean_cycles": 1,
+      "status": "validated"
+    }
+  ],
+  "reseed": null,
+  "conventions": {
+    "naming": {
+      "run_name_rule": "<=20 chars, lowercase-hyphens, == experiment dir basename",
+      "wandb_project_name_rule": "== experiment dir basename (set in the baseline config)",
+      "branch_rule": "evo/o-batch<N>-<track>; per-exp ids/branches assigned by `evo new`"
+    },
+    "logging": {
+      "required_per_step_metrics": [
+        "step",
+        "dino",
+        "jepa",
+        "kde",
+        "fino",
+        "total",
+        "grad_norm",
+        "lr"
+      ],
+      "wandb_main_panel_prefix": "main-train-results/",
+      "wandb_main_panel_keys": [
+        "dino",
+        "jepa",
+        "kde",
+        "fino",
+        "total",
+        "grad_norm",
+        "lr"
+      ],
+      "fino_logging": "meta_loss (FINO metadata-contrastive term) MUST be present per step as 'fino' in metrics.jsonl AND in the 'main-train-results/' wandb panel. fino = float(meta_loss.detach()).",
+      "canonical_logger": {
+        "module": "overfitX/overfitx_logging.py",
+        "function": "ovfx_canon_step(train_log, *, fino, wandb_run, wandb_step)",
+        "design": "READS dino/jepa/kde/total/grad_norm/lr from train_log (already correct in every branch); only fino is passed in. Never re-passes branch-specific loss variables (doing so previously clobbered train_log['dino'] with the FINO value). Mirrors the canonical core to the single 'main-train-results/' wandb panel.",
+        "injection": "reseed_prep.py:patch_logging injects ONE call before the first metrics_path.open() write; idempotent guard marker '# ovfx_canon_log'; compile-gated, reverts train.py on syntax error."
+      },
+      "summary_required_additions": [
+        "final_probe_score",
+        "final_probe_<probe>_*"
+      ],
+      "summary_required_keys": [
+        "config_path",
+        "wandb",
+        "slurm_job_id",
+        "resumed_from",
+        "steps_completed",
+        "final_probe_score",
+        "final_probe_<probe>_*"
+      ],
+      "metrics_jsonl_rule": "one JSON row per training step",
+      "summary_md_rule": "## Results + ## Analysis sections per nanopath-ops:submitter"
+    },
+    "probe_regime": {
+      "train_track": "RAW - NO probe_features()/encode_image() readout hunks in a training diff",
+      "preprobe_track": "readout-only - touches ONLY probe_features()/encode_image()",
+      "probe_py": "LOCKED - never edited; enforced by phantom_summary + invariants + readout_contamination gates"
+    },
+    "pinned_at": "2026-06-21T00:00:00Z"
+  },
+  "updated_at": "2026-06-21T00:00:00Z",
+  "selection_principle": "diversity + potential over rank; architectural/scale-invariant bets carried regardless of low single-seed score. HPO survivors anchor the RAW baseline only; the SEARCH pursues the novel portfolio.",
+  "cycle_params": {
+    "principle": "optimize for GENERALIZATION across seed resets, not raw score; novelty >> HPO; knowledge carries across ALL cycles (persistent), reseed validates vs per-seed variation",
+    "per_cycle_reseed": {
+      "enabled": true,
+      "what": "reseed carried top-10 training on the fresh seed each cycle -> cycle exploitation base",
+      "note": "recurs every cycle; the recurring reseed is the validator"
+    },
+    "train_branch": {
+      "trials": 60,
+      "concurrency": 6,
+      "split": "40% exploit / 60% explore (exploitation rises over cycle, model-decided)",
+      "explore": "new novel ideas AND deeper continuation of promising ones",
+      "per_idea_trial_budget": 6,
+      "idea_gen": "opus generator emits ideas in BATCHES OF 6; regenerate after each batch finishes; folds INBOX each batch",
+      "exploration_contract": "each major explore idea ships pre-declared failure instrumentation + contingency (e.g. patch-similarity divergence watch)"
+    },
+    "preprobe_branch": {
+      "trials": 20,
+      "concurrency": 1,
+      "panel": "2 random survivor ckpts + consolidated baseline (FIXED per cycle)",
+      "seed": "top-3 carried pre-probe ideas (continuously monitored)",
+      "anneal": "reduce runs as gains saturate -> stable point",
+      "fold_in": "a pre-probe idea that becomes plainly solid folds into the training base; training may test around it (do not over-combine)"
+    },
+    "convergence": {
+      "review": "EVERY run made this cycle (not just leaders)",
+      "carry": "top-3 preprobe + top-10 training by POTENTIAL (generalization), may combine aspects",
+      "consolidation_may_promote": true
+    },
+    "graduation": {
+      "enabled": true,
+      "rule": "validated + match-clean >=2 consecutive cycles -> bake into permanent base",
+      "plus": "consolidation may also surface base-worthy mechanisms holistically"
+    },
+    "inbox": {
+      "path": "overfitX/INBOX/",
+      "read_when": "every batch-of-6 regeneration (train) + before each preprobe run",
+      "idea_md": "new direction -> explore pool with up-to-6 potential budget",
+      "result_json": "side-test result -> updates exploitation priors/potential"
+    }
+  },
+  "base_objective": "RAW baseline ALWAYS carries dino+jepa+kde+fino (graduated cycle-0 constants); the search never re-litigates these \u2014 it builds ON them.",
+  "live_batch": "overfitX/batch02",
+  "round": 1,
+  "split_seed": 7777,
+  "portfolio": "overfitX/batch02/novel_directions.json",
+  "preprobe_baseline_readout": {
+    "note": "the STANDING base eval readout \u2014 a FIXED FEED-FORWARD transform applied uniformly to all compared models (fair). NOT separate directions.",
+    "components": [
+      "Plain CLS token",
+      "JBU-last4 multi-layer dense-fusion seg densifier"
+    ]
+  },
+  "main_sync": {
+    "status": "DONE",
+    "source": "medarc/main (MedARC-AI/nanopath)",
+    "official_remote": "medarc",
+    "locked_paths_synced": [
+      "probe.py:7aa6834fe5c41553d8c8479f78dc47671e112e2b",
+      "labless/submit_to_labless.py:a900a28488eb02889bb0ee114244c7cb2e48a5f5",
+      "benchmarking/:fc23b5770e39fa736187db013ad0f735ed8e02fd"
+    ],
+    "eval_path_divergence": "none \u2014 all locked paths identical between HEAD and medarc/main",
+    "labless_reconciled": "already canonical \u2014 no stale version detected (MAX_REVIEW_FILES_BYTES=120_000 consistent with MAX_REPO_DIFF_BYTES=120_000)",
+    "synced_at": "2026-06-21T06:52:00Z"
+  },
+  "reseed_anchor_seed": 314159,
+  "baseline_readout": "concat CLS-stack + JBU-last4 patch-fusion seg (composite)",
+  "archive": {
+    "cycle_1": "overfitX/batch01/archive/cycle1/",
+    "cycle_1_archived_at": "2026-06-21T06:52:00Z",
+    "note": "metadata only \u2014 checkpoints preserved on disk (no .pt files deleted)"
+  }
+}
