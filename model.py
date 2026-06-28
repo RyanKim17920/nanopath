@@ -380,6 +380,31 @@ class DinoV2ViT(nn.Module):
             caps = self._forward_intermediates(x, self.CLS_DEPTHS)
             feats = [F.normalize(self.norm(caps[d])[:, 0], dim=-1, p=2) for d in self.CLS_DEPTHS]
             return torch.cat(feats + [pool], dim=-1)  # [B, (4 + 1) * embed_dim]
+        if mode == "patch_softmax":
+            # Softmax-weighted magnitude pooling of patch tokens, concatenated onto the
+            # validated concat_fino multi-depth CLS base. Unlike GeM's fixed exponent, this
+            # uses softmax of patch L2 norms as adaptive per-patch weights: salient patches
+            # (high norm) receive higher weight, dull patches receive near-zero weight.
+            # Temperature controls sharpness: temp=1.0 is flat softmax on norms; lower temp
+            # sharpens selection toward the single highest-norm patch.
+            # Tunables (env): OVFX_SOFTMAX_ALPHA scale on the L2-normed pool block (default 0.5),
+            # OVFX_SOFTMAX_TEMP temperature for softmax (default 1.0),
+            # OVFX_SOFTMAX_BASE cls base ("concat" multi-depth default | "single" final CLS only).
+            sm_alpha = float(os.environ.get("OVFX_SOFTMAX_ALPHA", "0.5"))
+            sm_temp = float(os.environ.get("OVFX_SOFTMAX_TEMP", "1.0"))
+            sm_base = os.environ.get("OVFX_SOFTMAX_BASE", "concat")
+            out = self(x)
+            p = out["x_norm_patchtokens"]  # [B, n_patch, D]
+            w_raw = p.norm(dim=-1)  # [B, n_patch] per-patch L2 norm
+            w = F.softmax(w_raw / sm_temp, dim=1)  # [B, n_patch] adaptive weights
+            pool = (p * w.unsqueeze(-1)).sum(dim=1)  # [B, D] weighted mean
+            pool = sm_alpha * F.normalize(pool, dim=-1, p=2)  # [B, D] scaled & normalized
+            if sm_base == "single":
+                cls = F.normalize(out["x_norm_clstoken"], dim=-1, p=2)
+                return torch.cat([cls, pool], dim=-1)  # [B, 2 * embed_dim]
+            caps = self._forward_intermediates(x, self.CLS_DEPTHS)
+            feats = [F.normalize(self.norm(caps[d])[:, 0], dim=-1, p=2) for d in self.CLS_DEPTHS]
+            return torch.cat(feats + [pool], dim=-1)  # [B, (4 + 1) * embed_dim]
         if mode == "reg_mean":
             out = self(x)
             cls = F.normalize(out["x_norm_clstoken"], dim=-1, p=2)

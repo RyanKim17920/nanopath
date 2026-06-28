@@ -1,5 +1,5 @@
 project:
-  name: main-dinov2
+  name: overfitx-batch5-preprobe-patch_softmax
   family: nanopath
   recipe_id: dinov2-vits14-reg-kde
   output_dir: /data/$USER/nanopath/main/default
