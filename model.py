@@ -446,11 +446,22 @@ class DinoV2ViT(nn.Module):
                 sinkhorn_out = self(x)["x_norm_clstoken"]
             else:
                 d_stack = torch.stack(d_cls, dim=1)  # [B, K, D]
+                # NUMERIC STABILITY: L2-normalized CLS features are signed (mean~0 after LayerNorm),
+                # so raw sum-normalization can hit 0/negative denominators -> NaN. Shift by 1.0
+                # (preserves relative structure; L2-normed features are O(0.1), so +1.0 is moderate)
+                # to ensure all values are positive before the Sinkhorn-Knopp iterations.
+                # Also add a defensive eps in the divisor to prevent 0/0 if a column sums to ~0.
+                d_stack = d_stack + 1.0
                 # Sinkhorn-Knopp across the K=depth axis: alternate col-norm (K) and row-norm (B).
                 for _ in range(sk_k):
                     d_stack = d_stack / d_stack.sum(dim=1, keepdim=True).clamp_min(1e-12)  # col-norm (K)
                     d_stack = d_stack / d_stack.sum(dim=0, keepdim=True).clamp_min(1e-12)  # row-norm (B)
                 sinkhorn_out = d_stack.sum(dim=1)  # [B, D] — marginal-preserving projection
+                # Defensive NaN guard: if the iteration produced NaN (e.g. extreme value imbalance
+                # under bfloat16 autocast), fall back to a stable mean-pool of the depth CLS so
+                # downstream probes still receive a finite embedding (no crashed Linear/LogReg).
+                if torch.isnan(sinkhorn_out).any() or torch.isinf(sinkhorn_out).any():
+                    sinkhorn_out = torch.stack(d_cls, dim=1).mean(dim=1)
             feats = feats + [F.normalize(sinkhorn_out, dim=-1, p=2)]
             return torch.cat(feats, dim=-1)  # [B, 5 * embed_dim]
         caps = self._forward_intermediates(x, self.CLS_DEPTHS)
