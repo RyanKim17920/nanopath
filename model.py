@@ -244,6 +244,7 @@ class DinoV2ViT(nn.Module):
         #   concat_quantile  -> CLS-stack || per-dim Q0.1,Q0.5,Q0.9 of patches
         #   concat_normweight -> CLS-stack || norm-weighted patch mean
         #   concat_gram      -> CLS-stack || compact second-order sketch of patch features
+        #   sinkhorn_cls     -> concat_fino 4-depth stack || Sinkhorn-centered (K=5 iters) projection
         # All are fixed feed-forward functions of frozen features (no per-image opt,
         # no eval-set stats) -> legal under the eval-fairness rule.
         mode = os.environ.get("OVFX_CLS", "plain")
@@ -398,6 +399,35 @@ class DinoV2ViT(nn.Module):
             reg = self(x)["x_norm_regtokens"].mean(dim=1)  # [B, D]
             feats = feats + [F.normalize(reg, dim=-1, p=2)]
             return torch.cat(feats, dim=-1)  # [B, (4+1) * embed_dim]
+        if mode == "sinkhorn_cls":
+            # Build ON TOP of concat_fino: KEEP the 4-depth CLS concat (preserves the
+            # classification/knn/16shot richness) AND APPEND a Sinkhorn-Knopp doubly-stochastic
+            # centered CLS as a 5th block. Concretely: stack the 4 depth-CLS into [B, K, D] then
+            # apply K_ITER Sinkhorn-Knopp iterations alternating col(K)-then-row(B) normalization.
+            # After convergence the B x K matrix (per output dim) is doubly-stochastic -- the
+            # marginal batch bias is removed, leaving a centered projection. Sum over the K=depth
+            # axis gives [B, D]; L2-normed and appended to the 4-depth concat_fino stack.
+            # Per-image, feed-forward, no eval-set stats -> legal under the eval-fairness rule.
+            # Tunables (env): OVFX_SINKHORN_K iterations (default 5),
+            # OVFX_SINKHORN_BASE "concat" (default, build-on-top) | "single" (final-CLS ablated).
+            caps = self._forward_intermediates(x, self.CLS_DEPTHS)
+            d_cls = [self.norm(caps[d])[:, 0] for d in self.CLS_DEPTHS]  # each [B, D]
+            feats = [F.normalize(c, dim=-1, p=2) for c in d_cls]          # concat_fino base (4 blocks)
+            sk_k = int(os.environ.get("OVFX_SINKHORN_K", "5"))
+            sk_base = os.environ.get("OVFX_SINKHORN_BASE", "concat")
+            if sk_base == "single":
+                # Ablation: use only the final CLS as the Sinkhorn input (1-iter centering is
+                # trivial; this path is only used for sanity checks. Default path is "concat").
+                sinkhorn_out = self(x)["x_norm_clstoken"]
+            else:
+                d_stack = torch.stack(d_cls, dim=1)  # [B, K, D]
+                # Sinkhorn-Knopp across the K=depth axis: alternate col-norm (K) and row-norm (B).
+                for _ in range(sk_k):
+                    d_stack = d_stack / d_stack.sum(dim=1, keepdim=True).clamp_min(1e-12)  # col-norm (K)
+                    d_stack = d_stack / d_stack.sum(dim=0, keepdim=True).clamp_min(1e-12)  # row-norm (B)
+                sinkhorn_out = d_stack.sum(dim=1)  # [B, D] — marginal-preserving projection
+            feats = feats + [F.normalize(sinkhorn_out, dim=-1, p=2)]
+            return torch.cat(feats, dim=-1)  # [B, 5 * embed_dim]
         caps = self._forward_intermediates(x, self.CLS_DEPTHS)
         feats = [F.normalize(self.norm(caps[d])[:, 0], dim=-1, p=2) for d in self.CLS_DEPTHS]
         if mode == "concat_meanpatch":
@@ -423,6 +453,7 @@ class DinoV2ViT(nn.Module):
         # Unset/"jbu_last4" = the current default (JBU on last-4-block concat).
         #   plain     -> [registers || patch tokens], native grid, NO JBU
         #   jbu_last1 -> JBU densify of the LAST block only (no depth concat)
+        #   jbu_last3 -> JBU densify of the last-3-block patch concat
         #   jbu_last4 -> JBU densify of the last-4-block patch concat (default)
         seg_mode = os.environ.get("OVFX_SEG", "jbu_last4")
         if seg_mode == "plain":
@@ -438,6 +469,24 @@ class DinoV2ViT(nn.Module):
             reg = self.registers
             patch_parts, reg_parts = [], []
             for d in all_depths:
+                normed = self.norm(caps[d])
+                reg_parts.append(normed[:, 1 : 1 + reg])
+                patch_parts.append(normed[:, 1 + reg :])
+            patches = torch.cat(patch_parts, dim=-1)
+            regs = torch.cat(reg_parts, dim=-1)
+            B, n_patch, C = patches.shape
+            g = int(round(n_patch ** 0.5))
+            grid = patches.transpose(1, 2).reshape(B, C, g, g)
+            dense = self._jbu_upsample(grid, x, self.SEG_GRID)
+            dense = dense.flatten(2).transpose(1, 2)
+            return torch.cat([regs, dense], dim=1)
+        if seg_mode == "seg_jbu_last3":
+            depth = len(self.blocks)
+            last_three = tuple(depth - 1 - k for k in (2, 1, 0))
+            caps = self._forward_intermediates(x, last_three)
+            reg = self.registers
+            patch_parts, reg_parts = [], []
+            for d in last_three:
                 normed = self.norm(caps[d])
                 reg_parts.append(normed[:, 1 : 1 + reg])
                 patch_parts.append(normed[:, 1 + reg :])
