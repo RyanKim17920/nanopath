@@ -280,6 +280,8 @@ def main():
     # FINO per-factor lambda: fino.lambdas {factor: float}, fino.lambda_default (float, 0.03)
     FINO_LAMBDA_DEFAULT = fino_cfg.get("lambda_default", 0.03) if fino_cfg else 0.03
     FINO_LAMBDAS = fino_cfg.get("lambdas", {}) if fino_cfg else {}
+    # FINO temperature: fino.tau (float, default 0.023); controls softmax sharpness in discrete branch
+    FINO_TAU = fino_cfg.get("tau", 0.023) if fino_cfg else 0.023
     # FINO grad-cos diagnostic: fino.log_grad_cos (bool, default false)
     FINO_LOG_GRADCOS = fino_cfg.get("log_grad_cos", False) if fino_cfg else False
     step = 0
@@ -535,7 +537,7 @@ def main():
                 for j, (f, sign) in enumerate(fino_disc):
                     lab = md[:, j].repeat(train_cfg["global_views"]); ok = lab >= 0  # repeat, NOT interleave
                     if ok.any():
-                        logits = (GradScale.apply(phi_s[ok], sign * gamma) @ protos[f].t()) / 0.023
+                        logits = (GradScale.apply(phi_s[ok], sign * gamma) @ protos[f].t()) / FINO_TAU
                         terms.append((f, FINO_LAMBDAS.get(f, FINO_LAMBDA_DEFAULT) * F.cross_entropy(logits, lab[ok])))
                         with torch.no_grad():
                             pt, lt = phi_t[ok], lab[ok]
