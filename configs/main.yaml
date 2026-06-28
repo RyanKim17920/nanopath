@@ -1,5 +1,5 @@
 project:
-  name: 20260622_fino-deep
+  name: 20260628_fino-2factor-subtype-scanner
   family: nanopath
   recipe_id: dinov2-vits14-reg-jepa-mask10
   output_dir: /data/$USER/nanopath/jepa-fino/s2026
