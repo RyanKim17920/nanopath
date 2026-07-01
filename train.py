@@ -288,8 +288,15 @@ def main():
     wandb_name = cfg["project"].get("wandb_name") or proj_name
     if not cfg["project"].get("wandb_name"):
         out_name = output_dir.name
-        if out_name and out_name != proj_name:
-            wandb_name = f"{proj_name}-{out_name}"
+        if out_name:
+            # Dedupe: never self-duplicate when the two slugs overlap.
+            # If they're equal, or one is a prefix of the other, use the
+            # longer/more-specific basename ALONE (prefer out_name, the unique
+            # descriptive dir slug). Only join when genuinely distinct.
+            if out_name == proj_name or proj_name.startswith(out_name) or out_name.startswith(proj_name):
+                wandb_name = out_name if len(out_name) >= len(proj_name) else proj_name
+            else:
+                wandb_name = f"{proj_name}-{out_name}"
     if labless_autosubmit_file:
         wandb_name = json.loads(Path(labless_autosubmit_file).read_text()).get("run_name") or wandb_name
     slurm_job_id = os.environ.get("SLURM_JOB_ID")
