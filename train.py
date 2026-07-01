@@ -279,9 +279,17 @@ def main():
     train_flops = 0
     output_dir = Path(cfg["project"]["output_dir"])
     wandb_dir = Path(cfg["project"]["wandb_dir"])
-    # Make the run identity legible (output_dir basename = evo exp id or the run's own name),
-    # so wandb runs are distinguishable instead of all sharing the static project name.
-    wandb_name = f"{cfg['project']['name']}-{output_dir.name}"
+    # WS-N: Descriptive WANDB run names.
+    # project.wandb_name is the readable display name (e.g. "c6-optimizer-gradnorm-w0p05-t1").
+    # Falls back to project.name (filesystem slug) for configs that don't have it.
+    # If using project.name + output_dir.name, only append when they differ to avoid
+    # self-duplication ("b6-l14-aw-t1-b6-l14-aw-t1").
+    proj_name = cfg["project"]["name"]
+    wandb_name = cfg["project"].get("wandb_name") or proj_name
+    if not cfg["project"].get("wandb_name"):
+        out_name = output_dir.name
+        if out_name and out_name != proj_name:
+            wandb_name = f"{proj_name}-{out_name}"
     if labless_autosubmit_file:
         wandb_name = json.loads(Path(labless_autosubmit_file).read_text()).get("run_name") or wandb_name
     slurm_job_id = os.environ.get("SLURM_JOB_ID")
@@ -319,6 +327,9 @@ def main():
         "name": wandb_name,
         "dir": str(wandb_dir),
         "config": cfg,
+        # WS-N: mechanism/config-diff tags from config (project.wandb_tags: list[str])
+        **({"tags": cfg["project"]["wandb_tags"]}
+           if "wandb_tags" in cfg["project"] else {}),
         "settings": wandb.Settings(
             console="wrap",
             x_file_stream_transmit_interval=5,
@@ -327,6 +338,12 @@ def main():
     if wandb_meta is not None:
         wandb_init["id"] = wandb_meta["id"]
         wandb_init["resume"] = "must"
+    # WANDB gate: keep smokes OFF WANDB. Fire when the config says so
+    # (project.wandb_mode == "disabled" -- set by make_train_smoke.py) OR when the
+    # output_dir basename is smoke-named (both smoke config generators guarantee this).
+    # Otherwise leave WANDB at its online default so FULL runs log normally.
+    if cfg["project"].get("wandb_mode") == "disabled" or "smoke" in output_dir.name.lower():
+        wandb_init["mode"] = "disabled"
     wandb_run = wandb.init(**wandb_init)
     for key in ("probe/target_flops", "probe/wall_seconds"):
         wandb_run.define_metric(key, hidden=True, overwrite=True)
