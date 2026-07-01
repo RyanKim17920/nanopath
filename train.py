@@ -14,6 +14,7 @@ import math
 import os
 import random
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -46,6 +47,96 @@ import overfitx_logging as _ovfx_log
 
 # Prefix every console line with wall time and job/process id so SLURM logs are easy to scan.
 def console_prefix(): return f"{time.strftime('%H:%M:%S')} {os.environ.get('SLURM_JOB_ID', str(os.getpid()))}"
+
+
+# ---------------------------------------------------------------------------
+# Probe watchdog: intrinsic wall-clock timeout around the (locked) probe launch.
+#
+# probe.queue_probe_job() runs the probe as a child via subprocess.run(..., check=True)
+# with NO timeout, and probe.py is a LOCKED file we may not edit. A hung probe (e.g.
+# frozen on pannuke segmentation) therefore blocks train.py forever and burns a GPU with
+# no recovery -- and a bare-launched job (no trial.py external job_watch) has nothing to
+# rescue it. This watchdog gives every probe invocation a finite wall-clock budget.
+#
+# Normal full 12-task probe ~50 min (pannuke seg alone ~24 min); under heavy /data IO
+# contention probes run slower. 120 min is a generous ceiling: >2x the healthy full-probe
+# time, so it never trips a real probe, but finite so a genuine hang self-aborts.
+PROBE_TIMEOUT_S = 120 * 60  # 2 hours
+
+
+class _ProbeTimeout(Exception):
+    """Raised by the SIGALRM handler when a probe exceeds PROBE_TIMEOUT_S."""
+
+
+def _probe_descendant_pids(root_pid):
+    # Return all transitive child PIDs of root_pid via /proc PPid links (Linux/SLURM).
+    children = {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return []
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/status") as fh:
+                for line in fh:
+                    if line.startswith("PPid:"):
+                        children.setdefault(int(line.split()[1]), []).append(int(entry))
+                        break
+        except OSError:
+            continue
+    out, stack = [], [root_pid]
+    while stack:
+        for child in children.get(stack.pop(), []):
+            out.append(child)
+            stack.append(child)
+    return out
+
+
+def _kill_probe_descendants(root_pid):
+    # SIGKILL the whole probe subtree (probe.py child + any dataloader workers) so no
+    # orphan lingers; kills descendants only, never root_pid (train.py itself).
+    for pid in _probe_descendant_pids(root_pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def _queue_probe_job_guarded(*args, **kwargs):
+    # Wrap the locked queue_probe_job() with a wall-clock watchdog. On timeout: kill the
+    # probe subtree, log PROBE_TIMEOUT, drop a failure marker, and abort the run non-zero
+    # so the job ENDS (releasing the GPU) instead of hanging -- correct for BOTH a bare
+    # launch and a trial.py launch (whose external watcher then sees a terminal state).
+    def _on_alarm(signum, frame):
+        _kill_probe_descendants(os.getpid())  # kill child while it is still alive/reachable
+        raise _ProbeTimeout()
+
+    try:
+        previous = signal.signal(signal.SIGALRM, _on_alarm)
+    except ValueError:
+        # signal.signal only works in the main thread; if not main thread, run unguarded.
+        return queue_probe_job(*args, **kwargs)
+    signal.alarm(PROBE_TIMEOUT_S)
+    try:
+        return queue_probe_job(*args, **kwargs)
+    except _ProbeTimeout:
+        _kill_probe_descendants(os.getpid())  # belt-and-suspenders
+        print(f"{console_prefix()} PROBE_TIMEOUT: probe exceeded {PROBE_TIMEOUT_S}s "
+              f"watchdog; killed probe subtree and aborting run (probe-failed).", flush=True)
+        try:
+            state = args[0] if args else kwargs.get("state")
+            results_dir = state["paths"]["results_dir"] if state else None
+            if results_dir is not None:
+                (Path(results_dir) / "PROBE_TIMEOUT").write_text(
+                    f"probe exceeded {PROBE_TIMEOUT_S}s watchdog\n")
+        except Exception:
+            pass
+        sys.exit(1)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 # Read the YAML recipe and fail before any GPU work if the parquet tile dataset is absent.
@@ -623,7 +714,7 @@ def main():
         if probe_state is None or (probe_state["paths"]["results_dir"] / f"step_{checkpoint_step:07d}.json").exists():
             log_probe_results()
             return
-        queue_probe_job(probe_state, checkpoint_payload(checkpoint_step, full=False), checkpoint_step, train_flops, min(1.0, target_samples / max_train_samples))
+        _queue_probe_job_guarded(probe_state, checkpoint_payload(checkpoint_step, full=False), checkpoint_step, train_flops, min(1.0, target_samples / max_train_samples))
         log_probe_results()
 
     # Queue the furthest crossed sample milestone so delayed probes do not run on stale checkpoints.
