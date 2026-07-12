@@ -214,6 +214,51 @@ def update_ema(student_module, teacher_module, momentum):
         bt.copy_(bs)
 
 
+def fair_supcon(z, y, temp):
+    # Fairness (cross-demographic) supervised contrastive loss. z: (N, D) L2-normalized CLS features; y: (N,) demographic
+    # labels. Positives for anchor i are DIFFERENT-demographic tiles (y_j != y_i); the SupCon objective pulls them
+    # together against all other tiles, so minimizing it destroys demographic cluster structure (the sensitive attribute
+    # becomes non-separable in the representation). Anchors with no cross-demographic partner contribute nothing.
+    n = z.shape[0]
+    if n < 2:
+        return z.new_zeros(())
+    sim = (z @ z.t()) / temp
+    self_mask = torch.eye(n, dtype=torch.bool, device=z.device)
+    sim = sim.masked_fill(self_mask, float("-inf"))
+    logdenom = torch.logsumexp(sim, dim=1, keepdim=True)
+    logprob = sim - logdenom
+    pos = (y[:, None] != y[None, :]) & ~self_mask
+    pos_count = pos.sum(1)
+    valid = pos_count > 0
+    if not bool(valid.any()):
+        return z.new_zeros(())
+    per_anchor = -(logprob.masked_fill(~pos, 0.0)).sum(1) / pos_count.clamp(min=1)
+    return per_anchor[valid].mean()
+
+
+def pcgrad_project(g_main, g_dem, params):
+    # Fairness gradient projection (PCGrad variant). g_main/g_dem: per-parameter gradient lists (entries may be None)
+    # of the main SSL loss and the demographic-CE loss over `params`. If <g_main,g_dem> > 0 (descending g_main would
+    # also descend the demographic CE, i.e. IMPROVE demographic predictability), remove that component:
+    #   g_proj = g_main - (<g_main,g_dem> / ||g_dem||^2) g_dem   =>   <g_proj,g_dem> = 0 (orthogonal complement).
+    # Otherwise g_proj = g_main. Returns (projected_grad_list, info dict with cosines / norms / projected flag).
+    fm = torch.cat([(g if g is not None else torch.zeros_like(p)).reshape(-1) for g, p in zip(g_main, params)])
+    fd = torch.cat([(g if g is not None else torch.zeros_like(p)).reshape(-1) for g, p in zip(g_dem, params)])
+    dot = torch.dot(fm, fd); dem_sq = torch.dot(fd, fd)
+    cos_before = (dot / (fm.norm() * fd.norm() + 1e-12)).item()
+    projected = bool((dem_sq > 1e-12).item() and (dot > 0).item())
+    if projected:
+        coef = dot / dem_sq
+        new = [(gm if gm is not None else torch.zeros_like(p)) - coef * (gd if gd is not None else torch.zeros_like(p))
+               for gm, gd, p in zip(g_main, g_dem, params)]
+    else:
+        new = [(gm if gm is not None else torch.zeros_like(p)) for gm, p in zip(g_main, params)]
+    fn = torch.cat([g.reshape(-1) for g in new])
+    cos_after = (torch.dot(fn, fd) / (fn.norm() * fd.norm() + 1e-12)).item()
+    return new, {"cos_before": cos_before, "cos_after": cos_after, "dot": dot.item(),
+                 "norm_before": fm.norm().item(), "norm_after": fn.norm().item(), "projected": projected}
+
+
 # Orchestrates one pretraining run: setup, train+probe loop, checkpoint, summary.
 def main():
     cfg = load_config()
@@ -227,6 +272,15 @@ def main():
     fino_disc = [(f, float(s)) for f, s in fino_cfg.get("discrete", [])] if fino_cfg else []
     fino_cont = [(f, float(s)) for f, s in fino_cfg.get("continuous", [])] if fino_cfg else []
     fino_meta = json.loads((Path(cfg["data"]["dataset_dir"]) / "fino_meta.json").read_text()) if fino_cfg else {"n": {}, "cont_dim": {}}
+    # Fairness method selector (reuses the fino: block so all metadata plumbing — dataloader labels, gamma ramp,
+    # meta tuple, optimizer/checkpoint wiring — is shared). "fino" (default): EMA prototype-bank cross-entropy.
+    # "dann": a learned linear adversary per discrete factor + gradient reversal; NO prototype bank. Continuous
+    # factors (age) use the identical GRL+MLP regression branch under both methods.
+    fairness_method = (fino_cfg.get("method", "fino") if fino_cfg else "fino")
+    # Contrastive-fairness hyperparams (method=contrastive): temperature + weight for the cross-demographic
+    # SupCon term added to meta_loss. Unused by fino/dann/pcgrad.
+    contrastive_temp = float(fino_cfg.get("contrastive_temp", 0.2)) if fino_cfg else 0.2
+    contrastive_weight = float(fino_cfg.get("contrastive_weight", 0.1)) if fino_cfg else 0.1
     # FINO two-phase: freeze the backbone (except patch_embed) for the first this-fraction of the run so the DINO/JEPA
     # heads + metadata prototypes/predictors converge against a fixed target before they steer the encoder. 0 = off.
     freeze_backbone_frac = float(dino_cfg.get("freeze_backbone_fraction", 0.0))
@@ -257,16 +311,45 @@ def main():
     backbone_activated_params = sum(p.numel() for p in student_backbone.parameters() if p.requires_grad)
     # FINO continuous-factor predictors (phi -> vector regressors); their params join the optimizer.
     predictors = {f: nn.Sequential(nn.Linear(student_backbone.embed_dim, 512), nn.GELU(), nn.Linear(512, 256), nn.GELU(), nn.Linear(256, fino_meta.get("cont_dim", {}).get(f, 1))).to(device) for f, _ in fino_cont}
+    # DANN adversaries (method=dann only): one learned linear classifier per discrete factor predicting the
+    # attribute. A gradient reversal (model.GradScale with negative scale = -gamma) sits between the encoder CLS
+    # and each head in compute_losses, so the head learns the attribute while the encoder is pushed to make CLS
+    # non-predictive of it. No prototype bank. Their params join the optimizer like the continuous predictors.
+    adversaries = {f: nn.Linear(student_backbone.embed_dim, fino_meta["n"][f]).to(device) for f, _ in fino_disc} if (fino_cfg and fairness_method in ("dann", "pcgrad")) else {}
     # AdamW param groups carry per-parameter LR/WD multipliers (LWD + patch_embed + biases-no-WD).
     param_groups = build_param_groups(student_backbone, student_dino_head, student_predictor, dino_cfg["layerwise_decay"], dino_cfg["patch_embed_lr_mult"])
     if predictors:
         param_groups.append({"params": [p for m in predictors.values() for p in m.parameters()], "lr_mult": 1.0, "wd_mult": 1.0, "last_layer": False})
+    if adversaries:
+        param_groups.append({"params": [p for m in adversaries.values() for p in m.parameters()], "lr_mult": 1.0, "wd_mult": 1.0, "last_layer": False})
     opt = torch.optim.AdamW(param_groups, lr=1.0, betas=(0.9, dino_cfg["adam_beta2"]))
     # FINO prototype banks: one unit vector per discrete-factor value, EMA-updated from teacher CLS in compute_losses.
-    protos = {f: F.normalize(torch.randn(fino_meta["n"][f], student_backbone.embed_dim, device=device), dim=-1) for f, _ in fino_disc} if fino_cfg else {}
+    # Not built for method=dann (that path uses the learned adversary heads above instead).
+    protos = {f: F.normalize(torch.randn(fino_meta["n"][f], student_backbone.embed_dim, device=device), dim=-1) for f, _ in fino_disc} if (fino_cfg and fairness_method != "dann") else {}
     # FINO grad-equalisation EMA bank (one running grad-norm per factor); init 1.0 -> s_t~1 early. Not checkpointed
     # (mu=0.99 -> ~100-step memory, re-warms quickly on resume). Used only when fino.grad_equalize is set.
     grad_eq_ema = {f: torch.ones((), device=device) for f, _ in (fino_disc + fino_cont)} if fino_cfg else {}
+    # PCGrad fairness (method=pcgrad): SSL-trained params whose gradient gets projected, vs the demographic-classifier
+    # params trained normally (no reversal). pcgrad_apply computes the two gradients and projects at the step site.
+    # Filter to trainable params: DINOHead's weight-norm magnitude (last_layer...original0) is a registered but frozen
+    # (requires_grad=False) parameter; torch.autograd.grad rejects non-requiring inputs. Excluding it is a no-op
+    # mathematically (its gradient is zero) and avoids a RuntimeError at the first pcgrad step.
+    pcgrad_ssl_params = [p for p in (*student_backbone.parameters(), *student_dino_head.parameters(), *student_predictor.parameters()) if p.requires_grad]
+    pcgrad_clf_params = [p for p in ([p for m in adversaries.values() for p in m.parameters()] + [p for m in predictors.values() for p in m.parameters()]) if p.requires_grad]
+    def pcgrad_apply(main_loss, dem_loss, verbose=False):
+        g_main = torch.autograd.grad(main_loss, pcgrad_ssl_params, retain_graph=True, allow_unused=True)
+        g_all = torch.autograd.grad(dem_loss, pcgrad_ssl_params + pcgrad_clf_params, allow_unused=True)
+        n_ssl = len(pcgrad_ssl_params)
+        new_main, info = pcgrad_project(g_main, g_all[:n_ssl], pcgrad_ssl_params)
+        for p, g in zip(pcgrad_ssl_params, new_main):
+            p.grad = g
+        for p, g in zip(pcgrad_clf_params, g_all[n_ssl:]):
+            if g is not None:
+                p.grad = g
+        if verbose:
+            print(f"[pcgrad] cos_before={info['cos_before']:.4e} cos_after={info['cos_after']:.4e} "
+                  f"dot={info['dot']:.4e} projected={info['projected']}", flush=True)
+        return info
     step = 0
     batch_size = int(train_cfg["batch_size"])
     max_train_samples = int(train_cfg["max_train_samples"])
@@ -303,6 +386,8 @@ def main():
             protos = {k: v.to(device) for k, v in checkpoint["protos"].items()}
             for f, mdl in predictors.items():
                 mdl.load_state_dict(checkpoint["predictors"][f])
+            for f, mdl in adversaries.items():
+                mdl.load_state_dict(checkpoint["adversaries"][f])
         step = int(checkpoint["step"])
         examples_seen = int(checkpoint["examples_seen"])
         visible_patch_presentations = int(checkpoint["visible_patch_presentations"])
@@ -412,7 +497,8 @@ def main():
                 "predictor": cpu_state(student_predictor), "opt": opt.state_dict(),
                 "examples_seen": examples_seen, "visible_patch_presentations": visible_patch_presentations,
                 "train_flops": train_flops, "wandb": wandb_meta,
-                **({"protos": {k: v.cpu() for k, v in protos.items()}, "predictors": {f: cpu_state(m) for f, m in predictors.items()}} if fino_cfg else {})}
+                **({"protos": {k: v.cpu() for k, v in protos.items()}, "predictors": {f: cpu_state(m) for f, m in predictors.items()},
+                    "adversaries": {f: cpu_state(m) for f, m in adversaries.items()}} if fino_cfg else {})}
 
     def save_latest_checkpoint(checkpoint_step):
         nonlocal last_saved_step
@@ -469,22 +555,46 @@ def main():
                 for j, (f, sign) in enumerate(fino_disc):
                     lab = md[:, j].repeat(train_cfg["global_views"]); ok = lab >= 0  # repeat, NOT interleave
                     if ok.any():
-                        logits = (GradScale.apply(phi_s[ok], sign * gamma) @ protos[f].t()) / 0.023
-                        terms.append((f, 0.03 * F.cross_entropy(logits, lab[ok])))
-                        with torch.no_grad():
-                            pt, lt = phi_t[ok], lab[ok]
-                            upd = torch.zeros_like(protos[f]).index_add_(0, lt, pt)
-                            cnt = torch.zeros(protos[f].shape[0], 1, device=device).index_add_(0, lt, torch.ones_like(pt[:, :1]))
-                            seen = cnt.squeeze(1) > 0; new = protos[f].clone()
-                            new[seen] = F.normalize(0.99 * new[seen] + 0.01 * (upd[seen] / cnt[seen]), dim=-1); protos[f] = new
+                        if fairness_method == "dann":
+                            # DANN: a learned linear adversary predicts the attribute from the RAW student CLS; the
+                            # GradScale reverses the encoder gradient (sign*gamma; fairness sign=-1 -> -gamma), so the
+                            # head is trained to classify the attribute while the encoder is pushed to unlearn it. Same
+                            # sigmoid gamma ramp and missing-label mask (ok) as FINO; no prototype bank / no EMA update.
+                            logits = adversaries[f](GradScale.apply(sg["x_norm_clstoken"].float()[ok], sign * gamma))
+                            terms.append((f, 0.03 * F.cross_entropy(logits, lab[ok])))
+                        elif fairness_method == "pcgrad":
+                            # PCGrad: plain demographic CE from a learned classifier on the RAW student CLS, NO gradient
+                            # reversal. This term is returned as meta_loss but the pcgrad step site does NOT add it to
+                            # total_loss; it uses this gradient to project the SSL gradient (see pcgrad_apply).
+                            logits = adversaries[f](sg["x_norm_clstoken"].float()[ok])
+                            terms.append((f, F.cross_entropy(logits, lab[ok])))
+                        elif fairness_method == "contrastive":
+                            # Cross-demographic supervised contrastive: DIFFERENT-demographic tiles are positives pulled
+                            # together, removing demographic separability from the CLS features (see fair_supcon).
+                            terms.append((f, contrastive_weight * fair_supcon(phi_s[ok], lab[ok], contrastive_temp)))
+                        else:
+                            logits = (GradScale.apply(phi_s[ok], sign * gamma) @ protos[f].t()) / 0.023
+                            terms.append((f, 0.03 * F.cross_entropy(logits, lab[ok])))
+                            with torch.no_grad():
+                                pt, lt = phi_t[ok], lab[ok]
+                                upd = torch.zeros_like(protos[f]).index_add_(0, lt, pt)
+                                cnt = torch.zeros(protos[f].shape[0], 1, device=device).index_add_(0, lt, torch.ones_like(pt[:, :1]))
+                                seen = cnt.squeeze(1) > 0; new = protos[f].clone()
+                                new[seen] = F.normalize(0.99 * new[seen] + 0.01 * (upd[seen] / cnt[seen]), dim=-1); protos[f] = new
                 # FINO Eq.3 regresses continuous factors from the RAW backbone CLS; phi_s is L2-normalized (needed only
                 # for the cosine discrete branch and it strips the radial magnitude). raw_cls=True feeds the raw CLS.
                 cls_cont = sg["x_norm_clstoken"].float() if fino_cfg.get("raw_cls") else phi_s
                 for f, sign in fino_cont:
+                    if fairness_method == "contrastive":
+                        continue  # contrastive fairness is defined on discrete class labels only
                     val = mc[f].repeat(train_cfg["global_views"], 1); ok = ~torch.isnan(val).any(dim=1)
                     if ok.any():
-                        cpred = predictors[f](GradScale.apply(cls_cont[ok], sign * gamma))
-                        terms.append((f, 0.03 * F.mse_loss(cpred, val[ok])))
+                        if fairness_method == "pcgrad":
+                            cpred = predictors[f](cls_cont[ok])  # NO reversal: continuous demographic-prediction gradient
+                            terms.append((f, F.mse_loss(cpred, val[ok])))
+                        else:
+                            cpred = predictors[f](GradScale.apply(cls_cont[ok], sign * gamma))
+                            terms.append((f, 0.03 * F.mse_loss(cpred, val[ok])))
                 # FINO Alg A.3 per-branch gradient equalisation: rescale each branch by n_bar/EMA(||dL_t/dCLS||) so the
                 # discrete-CE and continuous-MSE gradients reach the encoder at matched magnitudes (detached -> reweight
                 # only; geometric-mean target; no-op for <2 branches). grad_eq_ema = per-factor EMA bank (mu=0.99).
@@ -632,8 +742,14 @@ def main():
                         ckpt=activation_checkpointing, meta=meta, cond=cond,
                     )
                     total_loss = dino_loss_value + jepa_loss + kde + meta_loss
-                opt.zero_grad(set_to_none=True)
-                total_loss.backward()
+                if fairness_method == "pcgrad" and meta is not None:
+                    # PCGrad fairness: no single total_loss.backward(). Get the main SSL gradient and the demographic
+                    # gradient separately, project the former onto the orthogonal complement of the latter, then apply.
+                    opt.zero_grad(set_to_none=True)
+                    pcgrad_apply(dino_loss_value + jepa_loss + kde, meta_loss)
+                else:
+                    opt.zero_grad(set_to_none=True)
+                    total_loss.backward()
                 if examples_seen / max_train_samples < freeze_backbone_frac:  # Phase 1: backbone frozen (patch_embed + heads + metadata still train)
                     for n, p in student_backbone.named_parameters():
                         if not n.startswith("patch_embed"): p.grad = None
