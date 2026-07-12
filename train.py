@@ -30,7 +30,7 @@ import yaml
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch.utils.flop_counter import FlopCounterMode
 
-from dataloader import TCGATileDataset, TILE_SIZE
+from dataloader import TCGATileDataset, TILE_SIZE, parse_local_size_mix
 from model import DINOHead, DinoV2ViT, GradScale, JEPAPredictor, SDHLHead, load_dinov2_pretrained
 from probe import (
     completed_probe_summary,
@@ -356,19 +356,16 @@ def main():
     # cannot share one tensor), which train.py forwards per group and concatenates at the
     # CLS token (size-independent) for the DINO local loss. When absent, the scalar path is
     # byte-identical. Total crops must be >= 8 (baseline is 8; fewer degrades clearly).
-    local_size_mix_cfg = train_cfg.get("local_size_mix")
-    if local_size_mix_cfg:
-        local_size_mix = [(int(s), int(c)) for s, c in local_size_mix_cfg]
+    # parse_local_size_mix is robust to the shapes the value arrives in after a
+    # config round-trip (list-of-pairs, flat [112,4,128,4], or a stringified form
+    # the SDK's config apply produces); it validates each pair and total >= 8, and
+    # returns None (scalar path, byte-identical) when the knob is absent.
+    local_size_mix = parse_local_size_mix(train_cfg.get("local_size_mix"))
+    if local_size_mix is not None:
         total_local_views = sum(c for _, c in local_size_mix)
-        if total_local_views < 8:
-            raise ValueError(
-                f"train.local_size_mix must total >= 8 local crops (baseline is 8); "
-                f"got {total_local_views} from {local_size_mix_cfg}"
-            )
         print(f"{console_prefix()} local_size_mix ENABLED {local_size_mix} "
               f"(total {total_local_views} local crops)", flush=True)
     else:
-        local_size_mix = None
         total_local_views = int(train_cfg["local_views"])
     # FINO metadata-guidance: select factors + signs (float; + encourage M+ / - suppress M-). fino_meta (built or
     # copied beside the dataset by prepare.py) holds per-factor barcode maps + cardinalities (n) / vector dims.

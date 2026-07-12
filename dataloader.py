@@ -19,9 +19,11 @@
 # (probe.py) do not import anything from here.
 
 import hashlib
+import ast
 import io
 import json
 import random
+import re
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +33,81 @@ import torch.nn as nn
 from PIL import Image
 from torch.utils.data import Dataset
 from torchvision.transforms import v2
+
+
+def parse_local_size_mix(raw):
+    """Canonicalize the optional ``train.local_size_mix`` knob into a list of
+    ``(size, count)`` int pairs, or ``None`` when the knob is absent/empty.
+
+    Multi-scale local crops are configured as ``[[112, 4], [128, 4]]`` (4 crops
+    at 112 px + 4 at 128 px). The value must survive a config round-trip through
+    the overfitX SDK, which STRINGIFIES scalar/compound overrides (so the pair
+    list can arrive as the string ``"[[112, 4], [128, 4]]"``) and can also flatten
+    the nesting to ``[112, 4, 128, 4]``. This parser accepts all of:
+      * a list of ``[size, count]`` pairs (or 2-tuples),
+      * a FLAT even-length numeric list ``[112, 4, 128, 4]``,
+      * a stringified form of either (``"[[112,4],[128,4]]"`` / ``"112,4,128,4"``),
+      * ``None`` / ``""`` / ``"null"`` / ``"none"`` / empty list  -> ``None`` (scalar path).
+    Each pair is validated (size>0, count>0) and the crops must total >= 8
+    (the scalar baseline is 8 crops; fewer degrades clearly). Returns a fresh
+    list of ``(int, int)`` tuples so the scalar ``local_size`` path stays
+    byte-identical whenever the knob is absent.
+    """
+    if raw is None:
+        return None
+    # Stringified forms produced by the config apply (values come back quoted).
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s or s.lower() in ("none", "null", "[]", "~"):
+            return None
+        try:
+            raw = ast.literal_eval(s)
+        except (ValueError, SyntaxError):
+            # Bare comma/space separated numbers, e.g. "112, 4, 128, 4".
+            nums = [p for p in re.split(r"[,\s]+", s.strip("[]() ")) if p]
+            raw = [int(float(p)) for p in nums]
+    if isinstance(raw, (int, float)):
+        raise ValueError(
+            f"train.local_size_mix must be a list of [size, count] pairs; got scalar {raw!r}"
+        )
+    raw = list(raw)
+    if not raw:
+        return None
+    # A flat numeric list [s0, c0, s1, c1, ...] regroups into pairs; anything
+    # else is treated as an iterable of [size, count] pair-likes.
+    if all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in raw):
+        if len(raw) % 2 != 0:
+            raise ValueError(
+                f"train.local_size_mix flat form needs an even number of size,count "
+                f"values; got {raw!r}"
+            )
+        pairs = [(raw[i], raw[i + 1]) for i in range(0, len(raw), 2)]
+    else:
+        pairs = []
+        for item in raw:
+            if isinstance(item, str):
+                item = [int(float(p)) for p in re.split(r"[,\s]+", item.strip("[]() ")) if p]
+            seq = list(item)
+            if len(seq) != 2:
+                raise ValueError(
+                    f"train.local_size_mix entries must be [size, count] pairs; got {item!r}"
+                )
+            pairs.append((seq[0], seq[1]))
+    out = []
+    for size, count in pairs:
+        size_i, count_i = int(size), int(count)
+        if size_i <= 0 or count_i <= 0:
+            raise ValueError(
+                f"train.local_size_mix pair must be positive [size, count]; got ({size!r}, {count!r})"
+            )
+        out.append((size_i, count_i))
+    total = sum(c for _, c in out)
+    if total < 8:
+        raise ValueError(
+            f"train.local_size_mix must total >= 8 local crops (baseline is 8); "
+            f"got {total} from {out}"
+        )
+    return out
 
 
 HED_FROM_RGB = torch.tensor(
@@ -172,8 +249,7 @@ class TCGATileDataset(Dataset):
         # multi-scale mode: `train.local_size_mix` = [[size, count], ...] produces the UNION of
         # crops at mixed pixel sizes (e.g. [[112, 4], [128, 4]]). When present it REPLACES the
         # scalar local_size/local_views schedule; when absent the scalar path is byte-identical.
-        _mix = train.get("local_size_mix")
-        self.local_size_mix = [(int(s), int(c)) for s, c in _mix] if _mix else None
+        self.local_size_mix = parse_local_size_mix(train.get("local_size_mix"))
         self.local_views = sum(c for _, c in self.local_size_mix) if self.local_size_mix else int(train["local_views"])
         self.to_tensor = v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)])
         # Global crops carry the high-context view used by the DINO/iBOT objectives.

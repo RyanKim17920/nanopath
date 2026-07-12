@@ -92,27 +92,48 @@ def pcgrad_backward(losses, params, main_loss_idx=0, conflict_threshold=0.0,
     numels = [p.numel() for p in params]
     shapes = [p.shape for p in params]
 
-    # Per-component flattened gradient vectors (zeros for detached components).
-    comp_vecs = []
-    active = []
-    for loss in losses:
-        if loss is None or not getattr(loss, "requires_grad", False) or loss.grad_fn is None:
-            comp_vecs.append(None)  # placeholder; filled with zeros below
-            active.append(False)
-            continue
-        grads = torch.autograd.grad(
-            loss, params, retain_graph=True, allow_unused=True, create_graph=False
-        )
-        grads = [
-            g.detach() if g is not None else torch.zeros(n, device=p.device, dtype=p.dtype)
-            for g, p, n in zip(grads, params, numels)
-        ]
-        comp_vecs.append(_flatten(grads))
-        active.append(True)
+    # Per-component gradient extraction via per-component .backward() into p.grad
+    # (grads zeroed between components), NOT a nested
+    # `torch.autograd.grad(loss, params, ...)`. The autograd.grad path re-enters
+    # the engine with an `inputs=params` restriction; on the live GPU graph — which
+    # under FlopCounterMode on the first step carries multi-grad / accumulate-grad
+    # hooks — that restriction trips the C++ engine:
+    #   RuntimeError: A leaf node was passed to _will_engine_execute_node but we
+    #   are currently running autograd.grad(). This is currently not supported.
+    # Plain .backward() takes the ordinary full-graph path those hooks already
+    # support (it is exactly what the disabled-default baseline runs), so per
+    # component we zero grads, backward (retaining the graph for all but the last),
+    # then read p.grad for the params the optimizer steps. Detached/constant
+    # components (requires_grad False / no grad_fn) contribute a zero vector.
+    saved_grads = [p.grad for p in params]
+    for p in params:
+        p.grad = None
+    active_idx = [
+        i for i, loss in enumerate(losses)
+        if loss is not None and getattr(loss, "requires_grad", False) and loss.grad_fn is not None
+    ]
+    comp_by_idx = {}
+    for pos, i in enumerate(active_idx):
+        for p in params:
+            p.grad = None
+        losses[i].backward(retain_graph=(pos < len(active_idx) - 1))
+        comp_by_idx[i] = _flatten([
+            p.grad.detach() if p.grad is not None
+            else torch.zeros(n, device=p.device, dtype=p.dtype)
+            for p, n in zip(params, numels)
+        ])
+    # Discard the per-component grads left in p.grad; the surgical result is
+    # written back explicitly below.
+    for p in params:
+        p.grad = None
+    comp_vecs = [comp_by_idx.get(i) for i in range(len(losses))]
+    active = [i in comp_by_idx for i in range(len(losses))]
 
     total = sum(numels)
     ref = next((v for v in comp_vecs if v is not None), None)
     if ref is None:
+        for p, g in zip(params, saved_grads):
+            p.grad = g  # restore prior grads; nothing to deconflict
         return {"pcgrad_active_components": 0}
     zero = torch.zeros(total, device=ref.device, dtype=ref.dtype)
     comp_vecs = [v if v is not None else zero for v in comp_vecs]
