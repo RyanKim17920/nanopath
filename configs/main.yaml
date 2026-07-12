@@ -42,7 +42,17 @@ train:
   local_views: 8
   global_size: 224
   local_size: 98
+  # Multi-scale local crops (disabled = scalar local_size). e.g. local_size_mix: [[112, 4], [128, 4]] (>= 8 crops).
+  local_size_mix: null
   resume: null # optional explicit checkpoint path; null means always start fresh and wipe output_dir
+
+# PCGrad gradient surgery over per-component SSL losses (disabled by default = byte-identical baseline).
+pcgrad:
+  enabled: false
+  mode: cosine_veto
+  conflict_threshold: -0.1
+  main_loss_idx: 0
+  ramp_fraction: 0.2
 
 dino:
   lr: 1.0e-4

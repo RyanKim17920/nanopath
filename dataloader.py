@@ -168,7 +168,13 @@ class TCGATileDataset(Dataset):
             self.cont_dim = {f: (len(next(iter(v.values()))) if v and isinstance(next(iter(v.values())), list) else 1) for f, v in self.meta_cont.items()}
         mean, std = data["mean"], data["std"]
         self.global_views = int(train["global_views"])
-        self.local_views = int(train["local_views"])
+        # Local-crop schedule. Default: `local_views` crops at a single `local_size`. Optional
+        # multi-scale mode: `train.local_size_mix` = [[size, count], ...] produces the UNION of
+        # crops at mixed pixel sizes (e.g. [[112, 4], [128, 4]]). When present it REPLACES the
+        # scalar local_size/local_views schedule; when absent the scalar path is byte-identical.
+        _mix = train.get("local_size_mix")
+        self.local_size_mix = [(int(s), int(c)) for s, c in _mix] if _mix else None
+        self.local_views = sum(c for _, c in self.local_size_mix) if self.local_size_mix else int(train["local_views"])
         self.to_tensor = v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)])
         # Global crops carry the high-context view used by the DINO/iBOT objectives.
         self.global_aug = v2.Compose(
@@ -184,18 +190,29 @@ class TCGATileDataset(Dataset):
             ]
         )
         # Local crops force the encoder to align small tissue regions with the global context.
-        self.local_aug = v2.Compose(
-            [
-                v2.RandomResizedCrop(train["local_size"], scale=tuple(data["local_crop_scale"]), antialias=True),
-                *([HEDJitter(data["hed_jitter"])] if data["hed_jitter"] > 0 else []),
-                v2.RandomHorizontalFlip(),
-                v2.RandomVerticalFlip(),
-                v2.ColorJitter(data["color_jitter"], data["color_jitter"], data["color_jitter_saturation"], 0.0),
-                v2.RandomGrayscale(p=0.1),
-                v2.RandomApply([v2.GaussianBlur(9, sigma=(0.1, 1.8))], p=0.35),
-                v2.Normalize(mean=mean, std=std),
-            ]
-        )
+        # Same augmentation pipeline as before, parameterized by crop pixel size so a single
+        # scalar local_size or a set of mixed sizes share identical transforms (only the
+        # RandomResizedCrop output size differs).
+        def _make_local_aug(size):
+            return v2.Compose(
+                [
+                    v2.RandomResizedCrop(size, scale=tuple(data["local_crop_scale"]), antialias=True),
+                    *([HEDJitter(data["hed_jitter"])] if data["hed_jitter"] > 0 else []),
+                    v2.RandomHorizontalFlip(),
+                    v2.RandomVerticalFlip(),
+                    v2.ColorJitter(data["color_jitter"], data["color_jitter"], data["color_jitter_saturation"], 0.0),
+                    v2.RandomGrayscale(p=0.1),
+                    v2.RandomApply([v2.GaussianBlur(9, sigma=(0.1, 1.8))], p=0.35),
+                    v2.Normalize(mean=mean, std=std),
+                ]
+            )
+        if self.local_size_mix is None:
+            self.local_aug = _make_local_aug(int(train["local_size"]))
+            self.local_augs = None
+        else:
+            self.local_aug = None
+            # One aug per DISTINCT size (a size may appear once); crops are grouped per size.
+            self.local_augs = {s: _make_local_aug(s) for s, _ in self.local_size_mix}
 
     # Dataset length is the number of tiles in this train/val split.
     def __len__(self):
@@ -233,7 +250,17 @@ class TCGATileDataset(Dataset):
         patient_key = int.from_bytes(hashlib.blake2b(patient_id.encode(), digest_size=8).digest(), "big") & 0x7FFFFFFFFFFFFFFF
         # Augmentations are stochastic per view; reproducibility comes from worker seeds.
         global_views = torch.stack([self.global_aug(tile) for _ in range(self.global_views)])
-        local_views = torch.stack([self.local_aug(tile) for _ in range(self.local_views)])
+        # Scalar path: one (local_views, 3, S, S) stacked tensor (byte-identical to before).
+        # Mix path: a LIST of per-size stacked tensors [(count_i, 3, size_i, size_i), ...];
+        # crops of different spatial size cannot share one tensor. default_collate batches each
+        # group element-wise, so train.py receives one (B, count_i, 3, size_i, size_i) per group.
+        if self.local_size_mix is None:
+            local_views = torch.stack([self.local_aug(tile) for _ in range(self.local_views)])
+        else:
+            local_views = [
+                torch.stack([self.local_augs[s](tile) for _ in range(c)])
+                for s, c in self.local_size_mix
+            ]
         # FINO per-factor labels for this tile's patient: discrete ids (-1 = missing), one tensor per continuous
         # factor (scalar or vector; nan-filled if missing). train.py masks missing branches out per-factor.
         fino_keys = {}

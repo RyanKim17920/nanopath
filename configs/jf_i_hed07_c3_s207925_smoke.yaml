@@ -47,6 +47,8 @@ train:
   local_views: 8
   global_size: 224
   local_size: 112
+  # Multi-scale local crops (disabled = scalar local_size). e.g. local_size_mix: [[112, 4], [128, 4]] (>= 8 crops).
+  local_size_mix: null
   resume: null
 dino:
   lr: 0.000125
@@ -102,6 +104,14 @@ probe:
     pathorob: /data/pathorob
     surgen: /data/surgen
     ucla_lung: /data/ucla-lung
+# PCGrad gradient surgery (disabled by default). Flip enabled: true to deconflict per-component grads.
+pcgrad:
+  enabled: false
+  mode: cosine_veto
+  conflict_threshold: -0.1
+  main_loss_idx: 0
+  ramp_fraction: 0.2
+
 fino:
   enabled: true
   gamma_max: 0.7

@@ -316,6 +316,42 @@ def main():
     labless_autosubmit_file = maybe_arm_labless_autosubmit(cfg, repo_dir)
     train_cfg = cfg["train"]
     dino_cfg = cfg["dino"]
+    # PCGrad (gradient surgery) over the per-component SSL losses (dino/jepa/kde/meta).
+    # Disabled unless a top-level `pcgrad:` block sets enabled: true, so the baseline
+    # takes the untouched total_loss.backward() path and stays byte-identical. Knobs
+    # (canonical dotted paths): pcgrad.enabled, pcgrad.mode ("cosine_veto"),
+    # pcgrad.conflict_threshold, pcgrad.main_loss_idx, pcgrad.ramp_fraction.
+    pcgrad_cfg = cfg.get("pcgrad") or {}
+    pcgrad_enabled = bool(pcgrad_cfg.get("enabled", False))
+    pcgrad_mode = str(pcgrad_cfg.get("mode", "cosine_veto"))
+    pcgrad_conflict_threshold = float(pcgrad_cfg.get("conflict_threshold", 0.0))
+    pcgrad_main_loss_idx = int(pcgrad_cfg.get("main_loss_idx", 0))
+    pcgrad_ramp_fraction = float(pcgrad_cfg.get("ramp_fraction", 0.0) or 0.0)
+    if pcgrad_enabled:
+        from pcgrad import pcgrad_backward
+        print(f"{console_prefix()} PCGrad ENABLED mode={pcgrad_mode} thr={pcgrad_conflict_threshold} "
+              f"main_idx={pcgrad_main_loss_idx} ramp={pcgrad_ramp_fraction}", flush=True)
+    # Multi-scale local crops: `train.local_size_mix` is an optional list of [size, count]
+    # pairs (e.g. [[112, 4], [128, 4]]) that REPLACES the single-scalar train.local_size /
+    # train.local_views local-crop schedule with a union of crops at mixed pixel sizes. The
+    # dataloader emits one stacked tensor per size group (crops of different spatial size
+    # cannot share one tensor), which train.py forwards per group and concatenates at the
+    # CLS token (size-independent) for the DINO local loss. When absent, the scalar path is
+    # byte-identical. Total crops must be >= 8 (baseline is 8; fewer degrades clearly).
+    local_size_mix_cfg = train_cfg.get("local_size_mix")
+    if local_size_mix_cfg:
+        local_size_mix = [(int(s), int(c)) for s, c in local_size_mix_cfg]
+        total_local_views = sum(c for _, c in local_size_mix)
+        if total_local_views < 8:
+            raise ValueError(
+                f"train.local_size_mix must total >= 8 local crops (baseline is 8); "
+                f"got {total_local_views} from {local_size_mix_cfg}"
+            )
+        print(f"{console_prefix()} local_size_mix ENABLED {local_size_mix} "
+              f"(total {total_local_views} local crops)", flush=True)
+    else:
+        local_size_mix = None
+        total_local_views = int(train_cfg["local_views"])
     # FINO metadata-guidance: select factors + signs (float; + encourage M+ / - suppress M-). fino_meta (built or
     # copied beside the dataset by prepare.py) holds per-factor barcode maps + cardinalities (n) / vector dims.
     fino_cfg = cfg["fino"] if (cfg.get("fino") or {}).get("enabled") else None
@@ -528,6 +564,12 @@ def main():
     global_grid = train_cfg["global_size"] // student_backbone.patch_size
     global_patches = global_grid ** 2
     local_patches = (train_cfg["local_size"] // student_backbone.patch_size) ** 2
+    # Visible local patch tokens per image across all local crops (metrics/FLOP accounting only).
+    # Scalar path: local_views * local_patches. Mix path: sum over size groups of count*patches(size).
+    if local_size_mix is None:
+        local_patch_presentations = train_cfg["local_views"] * local_patches
+    else:
+        local_patch_presentations = sum(c * ((s // student_backbone.patch_size) ** 2) for s, c in local_size_mix)
     last_time = time.time()
     last_examples = examples_seen
     last_visible_patch_presentations = visible_patch_presentations
@@ -582,9 +624,22 @@ def main():
             t_cls = teacher_dino_head(t["x_norm_clstoken"]).chunk(train_cfg["global_views"])
             t_prob = sinkhorn(torch.cat((t_cls[1], t_cls[0])), t_temp).view(2, b, -1)
         sg = student_backbone(gf, masks=masks, checkpoint=ckpt, log_diagnostics=log_diag)
-        sl = student_backbone(lf, checkpoint=ckpt)
-        sg_cls, sl_cls = student_dino_head(sg["x_norm_clstoken"]), student_dino_head(sl["x_norm_clstoken"])
-        L = train_cfg["local_views"]
+        # lf is a single flattened tensor (scalar local_size) OR a list of per-size
+        # flattened tensors (local_size_mix). Crops of different spatial size cannot
+        # share one backbone forward, so each size group is forwarded separately and
+        # their CLS tokens (size-independent) are concatenated crop-major before the
+        # DINO head. Single-group path is byte-identical to the original.
+        lf_groups = lf if isinstance(lf, (list, tuple)) else [lf]
+        if len(lf_groups) == 1:
+            sl = student_backbone(lf_groups[0], checkpoint=ckpt)
+            sl_cls = student_dino_head(sl["x_norm_clstoken"])
+        else:
+            sl_cls = torch.cat(
+                [student_dino_head(student_backbone(g, checkpoint=ckpt)["x_norm_clstoken"]) for g in lf_groups],
+                dim=0,
+            )
+        sg_cls = student_dino_head(sg["x_norm_clstoken"])
+        L = total_local_views
         local_loss = sum(dino_ce(x, y) for x in sl_cls.chunk(L) for y in t_prob) / (2 * L + 2)
         global_loss = dino_ce(sg_cls, t_prob.flatten(0, 1)) * 2 / (2 * L + 2)
         target = F.layer_norm(t["x_norm_patchtokens"].flatten(0, 1), (student_backbone.embed_dim,))[mask_idx]
@@ -642,6 +697,13 @@ def main():
             }
         return local_loss + global_loss, jepa_loss, kde, meta_loss, diag
 
+    # Move a batch's local-crop views to device and crop-major flatten. Scalar path returns one
+    # (V*B,3,H,W) tensor; local_size_mix path returns a LIST of per-size flattened tensors.
+    def build_lf(local_obj):
+        if isinstance(local_obj, (list, tuple)):
+            return [lv.to(device, non_blocking=True).transpose(0, 1).flatten(0, 1) for lv in local_obj]
+        return local_obj.to(device, non_blocking=True).transpose(0, 1).flatten(0, 1)
+
     # Held-out validation pass: same DINO + JEPA + KDE losses on `val_batches` of the val split.
     # Schedule terms (teacher_temp, kde_scale) drift over training, so read val curves as same-step
     # diagnostics. RNG is snapshotted/restored so val masks don't perturb the next training step.
@@ -656,10 +718,10 @@ def main():
         for vb_idx, vbatch in enumerate(val_loader):
             if vb_idx >= int(train_cfg["val_batches"]):
                 break
-            vg, vl = vbatch["global_views"].to(device, non_blocking=True), vbatch["local_views"].to(device, non_blocking=True)
+            vg = vbatch["global_views"].to(device, non_blocking=True)
             b = vg.shape[0]
             with torch.no_grad(), autocast:
-                gf, lf = vg.transpose(0, 1).flatten(0, 1), vl.transpose(0, 1).flatten(0, 1)
+                gf, lf = vg.transpose(0, 1).flatten(0, 1), build_lf(vbatch["local_views"])
                 masks, mask_idx, mask_w = make_block_mask(b * train_cfg["global_views"], global_grid, device, n_blocks=int(dino_cfg["jepa_blocks"]), block_scale=float(dino_cfg["jepa_block_scale"]))
                 dino_l, jepa_l, kde_v, _, _ = compute_losses(gf, lf, b, masks, mask_idx, mask_w, eval_teacher_temp, eval_kde_scale)
             sums += torch.tensor([float(dino_l), float(jepa_l), float(kde_v), float(dino_l + jepa_l + kde_v)], device=device)
@@ -783,8 +845,9 @@ def main():
             # Data identifiers stay on CPU and feed coverage metrics; image tensors move below.
             for key, batch_key in (("sample", "sample_idx"), ("slide", "slide_id"), ("patient", "patient_id")):
                 pending_ids[key].update(int(x) for x in batch[batch_key].tolist())
-            global_views, local_views = [batch[key].to(device, non_blocking=True) for key in ("global_views", "local_views")]
-            visible_now = batch_size * (train_cfg["global_views"] * global_patches + train_cfg["local_views"] * local_patches)
+            global_views = batch["global_views"].to(device, non_blocking=True)
+            local_views = batch["local_views"]  # tensor (scalar) or list of per-size tensors (mix); moved in build_lf
+            visible_now = batch_size * (train_cfg["global_views"] * global_patches + local_patch_presentations)
             # LR warmup uses the 1M-tile sample cap; decay/WD/teacher/freeze/KDE default to the public FLOP budget.
             # But this run hits the sample cap at ~19% of the FLOP budget, so a FLOP-keyed cosine only traverses ~0.11
             # of its arc (LR never anneals, KDE peaks at 0.22, WD ~0.05). lr_key/reg_key="sample" re-key the decay/reg
@@ -815,7 +878,7 @@ def main():
                     # Crop-major flatten: collate shape is (B, V, 3, H, W) but DINO wants per-crop chunks
                     # so [crop0_img0, crop0_img1, ..., crop1_img0, ...] for clean teacher/student alignment.
                     gf = global_views.transpose(0, 1).flatten(0, 1)
-                    lf = local_views.transpose(0, 1).flatten(0, 1)
+                    lf = build_lf(local_views)
                     # FINO DANN ramp keyed to nanopath's SAMPLE budget (NOT FLOPs — sample-capped at ~19% of the FLOP
                     # cap, so a flop-keyed ramp stalls gamma at ~0.75*gamma_max). Counted from the backbone-unfreeze
                     # point: gamma=0 through the frozen Phase 1 (banks warm), then ramps to full gamma_max by the cap.
@@ -831,7 +894,22 @@ def main():
                     )
                     total_loss = dino_loss_value + jepa_loss + kde + meta_loss
                 opt.zero_grad(set_to_none=True)
-                total_loss.backward()
+                pcgrad_diag = None
+                if pcgrad_enabled:
+                    # Gradient surgery over the four SSL components in a FIXED order so
+                    # main_loss_idx (0 = DINO) stays meaningful. Grads are taken w.r.t. exactly
+                    # the optimizer's stepped params, then the deconflicted combination is written
+                    # into p.grad (replacing total_loss.backward()). ramp_fraction blends surgery
+                    # in over the first ramp_fraction of sample progress (w: 0 -> naive, 1 -> full).
+                    pcgrad_params = [p for group in opt.param_groups for p in group["params"] if p.requires_grad]
+                    pcgrad_w = 1.0 if pcgrad_ramp_fraction <= 0.0 else min(1.0, sfrac / pcgrad_ramp_fraction)
+                    pcgrad_diag = pcgrad_backward(
+                        [dino_loss_value, jepa_loss, kde, meta_loss], pcgrad_params,
+                        main_loss_idx=pcgrad_main_loss_idx, conflict_threshold=pcgrad_conflict_threshold,
+                        mode=pcgrad_mode, ramp_weight=pcgrad_w,
+                    )
+                else:
+                    total_loss.backward()
                 if examples_seen / max_train_samples < freeze_backbone_frac:  # Phase 1: backbone frozen (patch_embed + heads + metadata still train)
                     for n, p in student_backbone.named_parameters():
                         if not n.startswith("patch_embed"): p.grad = None
@@ -860,6 +938,8 @@ def main():
                     "fino": float(meta_loss.detach()),  # ovfx_fino_log
                     "total": float(total_loss.detach()),
                 }
+                if pcgrad_diag is not None:
+                    reduced.update({k: float(v) for k, v in pcgrad_diag.items()})  # ovfx_pcgrad_log
                 unique_counts = flush_unique_counts()
                 now = time.time()
                 elapsed = max(1e-6, now - last_time)

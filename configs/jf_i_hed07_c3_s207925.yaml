@@ -47,6 +47,10 @@ train:
   local_views: 8
   global_size: 224
   local_size: 112
+  # Multi-scale local crops (disabled = scalar local_size above). Set to a list of
+  # [size, count] pairs summing to >= 8 crops to sweep mixed sizes, e.g.
+  # local_size_mix: [[112, 4], [128, 4]]  # 8 crops: 4@112 + 4@128
+  local_size_mix: null
   resume: null
 dino:
   lr: 0.000125
@@ -102,6 +106,16 @@ probe:
     pathorob: /data/pathorob
     surgen: /data/surgen
     ucla_lung: /data/ucla-lung
+# PCGrad gradient surgery over the per-component SSL losses (dino/jepa/kde/meta).
+# Disabled by default (baseline = naive total_loss.backward(), byte-identical).
+# Flip enabled: true to deconflict; the values below match the overfitX sweep intent.
+pcgrad:
+  enabled: false
+  mode: cosine_veto        # project component i off component j only when cos(gi,gj) < conflict_threshold
+  conflict_threshold: -0.1 # paper rule is 0 (dot<0); -0.1 deconflicts only clearly-opposed pairs
+  main_loss_idx: 0         # 0 = DINO is the primary objective; its gradient is preserved
+  ramp_fraction: 0.2       # blend surgery in over the first 20% of sample progress (0 = full from step 1)
+
 fino:
   enabled: true
   gamma_max: 0.7
