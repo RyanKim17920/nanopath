@@ -177,13 +177,24 @@ class DinoV2ViT(nn.Module):
     # Returns the dict shape Meta's `forward_features` returns; used by train.py and probe.py.
     # `checkpoint=True` re-runs each block under torch.utils.checkpoint to trade compute for memory;
     # useful when the 1-GPU batch of 128 (2 globals + 8 locals) does not fit in 80 GB.
-    def forward(self, x, masks=None, checkpoint=False, log_diagnostics=False):
+    # `return_blocks` (set/list of 0-indexed block ids) additionally captures each requested block's
+    # PATCH tokens (pre-final-norm) into result["blocks"] = {i: (B, n_patches, dim)}. Used by SDHL
+    # multi-depth JEPA (train.py) to regress the student's intermediate latents onto the EMA teacher's.
+    # None => fully backward compatible: existing callers (probe.py etc.) are unaffected + byte-identical.
+    def forward(self, x, masks=None, checkpoint=False, log_diagnostics=False, return_blocks=None):
+        if return_blocks is not None:
+            return_blocks = set(int(i) for i in return_blocks)
+            assert all(0 <= i < len(self.blocks) for i in return_blocks), \
+                f"return_blocks {sorted(return_blocks)} out of range for depth {len(self.blocks)}"
+        blocks_out = {} if return_blocks else None
         x = self._prepare_tokens(x, masks)
         if log_diagnostics:
             clear_diags()
             _token_norms = []
-            for blk in self.blocks:
+            for i, blk in enumerate(self.blocks):
                 x = blk(x, log_diagnostics=True)
+                if blocks_out is not None and i in return_blocks:
+                    blocks_out[i] = x[:, 1 + self.registers :]
                 r = self.registers
                 _token_norms.append({
                     "cls_norm":   float(x[:, 0].norm(dim=-1).mean().detach()),
@@ -204,18 +215,25 @@ class DinoV2ViT(nn.Module):
             result["_final_norm_cls"] = float(x[:, 0].norm(dim=-1).mean().detach())
             result["_final_norm_reg"] = float(x[:, 1 : 1 + self.registers].norm(dim=-1).mean().detach())
             result["_final_norm_patch"] = float(x[:, 1 + self.registers :].norm(dim=-1).mean().detach())
+            if blocks_out is not None:
+                result["blocks"] = blocks_out
             return result
-        for blk in self.blocks:
+        for i, blk in enumerate(self.blocks):
             if checkpoint and self.training:
                 x = torch.utils.checkpoint.checkpoint(blk, x, use_reentrant=False)
             else:
                 x = blk(x)
+            if blocks_out is not None and i in return_blocks:
+                blocks_out[i] = x[:, 1 + self.registers :]
         x = self.norm(x)
-        return {
+        result = {
             "x_norm_clstoken": x[:, 0],
             "x_norm_regtokens": x[:, 1 : 1 + self.registers],
             "x_norm_patchtokens": x[:, 1 + self.registers :],
         }
+        if blocks_out is not None:
+            result["blocks"] = blocks_out
+        return result
 
     # Probe contract: encode_image returns [registers || patches] for the seg head;
     # probe_features returns the cls token for classification probes.
@@ -281,3 +299,42 @@ class JEPAPredictor(nn.Module):
         for blk in self.blocks:
             x = blk(x)
         return self.proj(self.norm(x))
+
+
+# SDHL (Self-Distillation of Hidden Layers / multi-depth JEPA): on TOP of the final-layer I-JEPA target,
+# regress the STUDENT's masked patch latents at several intermediate blocks onto the EMA-TEACHER's latents at
+# the SAME blocks (stop-grad target). One trivial per-depth nn.Linear(dim, dim) maps the student's block-d patch
+# latent to a prediction; the target is the teacher's block-d latent passed through a NON-AFFINE (no trainable
+# params) LayerNorm so it stays a pure stop-grad quantity. Predictions and (LN'd, detached) targets are
+# concatenated across depths and a single smooth_l1 is taken over the concatenated vectors, reusing JEPA's
+# per-masked-patch inverse-frequency weighting. No patch-attention layers (operator caveat) -- linear heads only.
+class SDHLHead(nn.Module):
+    def __init__(self, dim, target_blocks, per_depth_layernorm=True, merge="concat"):
+        super().__init__()
+        assert merge == "concat", f"SDHLHead only supports merge='concat', got {merge!r}"
+        self.dim = dim
+        self.target_blocks = [int(b) for b in target_blocks]
+        self.per_depth_layernorm = bool(per_depth_layernorm)
+        self.merge = merge
+        # One student->prediction linear per target depth. These ARE the only trainable SDHL params.
+        self.heads = nn.ModuleList(nn.Linear(dim, dim) for _ in self.target_blocks)
+        # Non-affine target normalisers (elementwise_affine=False => no trainable params); keeps the target pure.
+        self.target_norms = nn.ModuleList(
+            nn.LayerNorm(dim, elementwise_affine=False) for _ in self.target_blocks
+        )
+
+    # student_blocks / teacher_blocks: {block_idx: (B, n_patches, dim)}. mask_idx indexes a flattened
+    # (B*n_patches, dim) tensor; mask_w is the per-masked-patch weight. Returns a scalar SDHL loss.
+    def forward(self, student_blocks, teacher_blocks, mask_idx, mask_w, b):
+        preds, targets = [], []
+        for k, d in enumerate(self.target_blocks):
+            s = student_blocks[d].flatten(0, 1)                 # (B*n_patches, dim), carries grad to student
+            t = teacher_blocks[d].flatten(0, 1).detach()        # stop-grad teacher latent
+            pred = self.heads[k](s)[mask_idx]                   # (M, dim)
+            tgt = self.target_norms[k](t) if self.per_depth_layernorm else t
+            tgt = tgt[mask_idx].detach()                        # (M, dim), pure stop-grad target
+            preds.append(pred)
+            targets.append(tgt)
+        pred_cat = torch.cat(preds, dim=-1)                     # (M, len(blocks)*dim)
+        tgt_cat = torch.cat(targets, dim=-1).detach()           # (M, len(blocks)*dim)
+        return F.smooth_l1_loss(pred_cat, tgt_cat, reduction="none").mean(-1).mul(mask_w).sum() / max(1, b * 2)

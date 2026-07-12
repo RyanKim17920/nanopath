@@ -54,6 +54,17 @@ pcgrad:
   main_loss_idx: 0
   ramp_fraction: 0.2
 
+# SDHL (multi-depth JEPA / Self-Distillation of Hidden Layers): regress the student's masked patch latents at
+# intermediate blocks onto the EMA-teacher's latents at the SAME blocks (stop-grad target), a deep-supervision
+# auxiliary term = concat-merged smooth_l1 over depths with JEPA's mask weighting. Disabled by default =
+# byte-identical baseline (no block capture, no extra loss). Flip enabled:true to activate.
+sdhl:
+  enabled: false
+  target_blocks: [8, 9, 10, 11]
+  merge: concat
+  loss_weight: 0.2
+  per_depth_layernorm: true
+
 dino:
   lr: 1.0e-4
   lr_min: 1.0e-6

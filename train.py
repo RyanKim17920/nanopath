@@ -31,7 +31,7 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch.utils.flop_counter import FlopCounterMode
 
 from dataloader import TCGATileDataset, TILE_SIZE
-from model import DINOHead, DinoV2ViT, GradScale, JEPAPredictor, load_dinov2_pretrained
+from model import DINOHead, DinoV2ViT, GradScale, JEPAPredictor, SDHLHead, load_dinov2_pretrained
 from probe import (
     completed_probe_summary,
     collect_probe_results,
@@ -331,6 +331,24 @@ def main():
         from pcgrad import pcgrad_backward
         print(f"{console_prefix()} PCGrad ENABLED mode={pcgrad_mode} thr={pcgrad_conflict_threshold} "
               f"main_idx={pcgrad_main_loss_idx} ramp={pcgrad_ramp_fraction}", flush=True)
+    # SDHL (moonshot: multi-depth JEPA / Self-Distillation of Hidden Layers). Regress the student's masked patch
+    # latents at INTERMEDIATE blocks onto the EMA-teacher's latents at the SAME blocks (stop-grad target), an
+    # auxiliary deep-supervision term = mean-over-depths (concat-merged) smooth_l1 reusing JEPA's mask weighting.
+    # Disabled unless a top-level `sdhl:` block sets enabled: true, so the baseline path is byte-identical (no
+    # return_blocks capture, no extra loss term). Knobs (canonical dotted paths): sdhl.enabled, sdhl.target_blocks
+    # (default [8,9,10,11]), sdhl.merge ("concat"), sdhl.loss_weight (0.2), sdhl.per_depth_layernorm.
+    sdhl_cfg = cfg.get("sdhl") or {}
+    sdhl_enabled = bool(sdhl_cfg.get("enabled", False))
+    sdhl_target_blocks = [int(b) for b in sdhl_cfg.get("target_blocks", [8, 9, 10, 11])]
+    sdhl_per_depth_ln = bool(sdhl_cfg.get("per_depth_layernorm", True))
+    sdhl_merge = str(sdhl_cfg.get("merge", "concat"))
+    sdhl_loss_weight = float(sdhl_cfg.get("loss_weight", 0.2))
+    if sdhl_enabled and (sdhl_loss_weight <= 0 or len(sdhl_target_blocks) == 0):
+        raise ValueError(f"sdhl.enabled=true requires loss_weight>0 and non-empty target_blocks; got "
+                         f"loss_weight={sdhl_loss_weight}, target_blocks={sdhl_target_blocks}")
+    if sdhl_enabled:
+        print(f"{console_prefix()} SDHL ENABLED target_blocks={sdhl_target_blocks} merge={sdhl_merge} "
+              f"per_depth_layernorm={sdhl_per_depth_ln} loss_weight={sdhl_loss_weight}", flush=True)
     # Multi-scale local crops: `train.local_size_mix` is an optional list of [size, count]
     # pairs (e.g. [[112, 4], [128, 4]]) that REPLACES the single-scalar train.local_size /
     # train.local_views local-crop schedule with a union of crops at mixed pixel sizes. The
@@ -383,6 +401,11 @@ def main():
     student_dino_head = DINOHead(student_backbone.embed_dim, 131072, dino_cfg["head_hidden_dim"], dino_cfg["head_bottleneck_dim"], 3).to(device)
     teacher_dino_head = deepcopy(student_dino_head)
     student_predictor = JEPAPredictor(student_backbone.embed_dim, depth=int(dino_cfg["jepa_pred_depth"]), width=int(dino_cfg["jepa_pred_width"]), n_cond=(fino_meta["n"][jepa_cond] if jepa_cond else 0)).to(device)
+    # SDHL multi-depth head: per-target-block student->prediction linears (trainable) + non-affine target norms.
+    # None when disabled => no params, no optimizer group, no loss term (baseline byte-identical).
+    sdhl_head = SDHLHead(student_backbone.embed_dim, sdhl_target_blocks, per_depth_layernorm=sdhl_per_depth_ln, merge=sdhl_merge).to(device) if sdhl_enabled else None
+    assert not sdhl_enabled or all(0 <= b < len(student_backbone.blocks) for b in sdhl_target_blocks), \
+        f"sdhl.target_blocks {sdhl_target_blocks} out of range for depth {len(student_backbone.blocks)}"
     for p in teacher_dino_head.parameters():
         p.requires_grad = False
     backbone_activated_params = sum(p.numel() for p in student_backbone.parameters() if p.requires_grad)
@@ -392,6 +415,9 @@ def main():
     param_groups = build_param_groups(student_backbone, student_dino_head, student_predictor, dino_cfg["layerwise_decay"], dino_cfg["patch_embed_lr_mult"])
     if predictors:
         param_groups.append({"params": [p for m in predictors.values() for p in m.parameters()], "lr_mult": 1.0, "wd_mult": 1.0, "last_layer": False})
+    # SDHL head params join the optimizer so the per-depth prediction linears actually train (same pattern as predictors).
+    if sdhl_head is not None:
+        param_groups.append({"params": list(sdhl_head.parameters()), "lr_mult": 1.0, "wd_mult": 1.0, "last_layer": False})
     opt = torch.optim.AdamW(param_groups, lr=1.0, betas=(0.9, dino_cfg["adam_beta2"]))
     # FINO prototype banks: one unit vector per discrete-factor value, EMA-updated from teacher CLS in compute_losses.
     protos = {f: F.normalize(torch.randn(fino_meta["n"][f], student_backbone.embed_dim, device=device), dim=-1) for f, _ in fino_disc} if fino_cfg else {}
@@ -446,6 +472,8 @@ def main():
         student_dino_head.load_state_dict(checkpoint["dino_head"])
         teacher_dino_head.load_state_dict(checkpoint["dino_head_ema"])
         student_predictor.load_state_dict(checkpoint["predictor"])
+        if sdhl_head is not None and "sdhl_head" in checkpoint:
+            sdhl_head.load_state_dict(checkpoint["sdhl_head"])
         opt.load_state_dict(checkpoint["opt"])
         if fino_cfg:
             protos = {k: v.to(device) for k, v in checkpoint["protos"].items()}
@@ -591,6 +619,7 @@ def main():
                 "predictor": cpu_state(student_predictor), "opt": opt.state_dict(),
                 "examples_seen": examples_seen, "visible_patch_presentations": visible_patch_presentations,
                 "train_flops": train_flops, "wandb": wandb_meta,
+                **({"sdhl_head": cpu_state(sdhl_head)} if sdhl_head is not None else {}),
                 **({"protos": {k: v.cpu() for k, v in protos.items()}, "predictors": {f: cpu_state(m) for f, m in predictors.items()}} if fino_cfg else {})}
 
     def save_latest_checkpoint(checkpoint_step):
@@ -619,11 +648,14 @@ def main():
     # Compute (dino_loss, jepa_loss, kde) for one batch of (gf, lf) crops with the given masks +
     # schedule values. Used by both the train step and evaluate() (no_grad).
     def compute_losses(gf, lf, b, masks, mask_idx, mask_w, t_temp, k_scale, ckpt=False, meta=None, cond=None, log_diag=False):
+        # SDHL: capture the requested intermediate blocks from BOTH teacher (stop-grad target) and student
+        # forwards. return_blocks=None (SDHL off) => forwards are byte-identical to baseline.
+        _rb = sdhl_target_blocks if sdhl_head is not None else None
         with torch.no_grad():
-            t = teacher_backbone(gf)
+            t = teacher_backbone(gf, return_blocks=_rb)
             t_cls = teacher_dino_head(t["x_norm_clstoken"]).chunk(train_cfg["global_views"])
             t_prob = sinkhorn(torch.cat((t_cls[1], t_cls[0])), t_temp).view(2, b, -1)
-        sg = student_backbone(gf, masks=masks, checkpoint=ckpt, log_diagnostics=log_diag)
+        sg = student_backbone(gf, masks=masks, checkpoint=ckpt, log_diagnostics=log_diag, return_blocks=_rb)
         # lf is a single flattened tensor (scalar local_size) OR a list of per-size
         # flattened tensors (local_size_mix). Crops of different spatial size cannot
         # share one backbone forward, so each size group is forwarded separately and
@@ -645,6 +677,12 @@ def main():
         target = F.layer_norm(t["x_norm_patchtokens"].flatten(0, 1), (student_backbone.embed_dim,))[mask_idx]
         pred = student_predictor(sg["x_norm_patchtokens"], cond).flatten(0, 1)[mask_idx]
         jepa_loss = F.smooth_l1_loss(pred, target, reduction="none").mean(-1).mul(mask_w).sum() / max(1, b * 2)
+        # SDHL multi-depth JEPA: student block-d masked latents -> per-depth linear -> smooth_l1 vs stop-grad
+        # EMA-teacher block-d latents (non-affine LN'd), concatenated across depths. Same masking/weighting as JEPA.
+        if sdhl_head is not None:
+            sdhl_loss = sdhl_head(sg["blocks"], t["blocks"], mask_idx, mask_w, b)
+        else:
+            sdhl_loss = sg["x_norm_clstoken"].new_zeros(())
         kde = dino_cfg["kde_loss_weight"] * k_scale * sum(kde_loss(x, dino_cfg["kde_concentration"]) for x in sg["x_norm_clstoken"].chunk(train_cfg["global_views"]))
         # FINO metadata guidance on the CLS token (train-only; meta=None in eval), orthogonal to the JEPA patch
         # objective. lambda_meta=0.03/branch; GradScale gates the encoder gradient by the DANN ramp gamma with the
@@ -695,7 +733,7 @@ def main():
                 "final_reg": sg.get("_final_norm_reg"),
                 "final_patch": sg.get("_final_norm_patch"),
             }
-        return local_loss + global_loss, jepa_loss, kde, meta_loss, diag
+        return local_loss + global_loss, jepa_loss, kde, meta_loss, diag, sdhl_loss
 
     # Move a batch's local-crop views to device and crop-major flatten. Scalar path returns one
     # (V*B,3,H,W) tensor; local_size_mix path returns a LIST of per-size flattened tensors.
@@ -723,7 +761,7 @@ def main():
             with torch.no_grad(), autocast:
                 gf, lf = vg.transpose(0, 1).flatten(0, 1), build_lf(vbatch["local_views"])
                 masks, mask_idx, mask_w = make_block_mask(b * train_cfg["global_views"], global_grid, device, n_blocks=int(dino_cfg["jepa_blocks"]), block_scale=float(dino_cfg["jepa_block_scale"]))
-                dino_l, jepa_l, kde_v, _, _ = compute_losses(gf, lf, b, masks, mask_idx, mask_w, eval_teacher_temp, eval_kde_scale)
+                dino_l, jepa_l, kde_v, _, _, _ = compute_losses(gf, lf, b, masks, mask_idx, mask_w, eval_teacher_temp, eval_kde_scale)
             sums += torch.tensor([float(dino_l), float(jepa_l), float(kde_v), float(dino_l + jepa_l + kde_v)], device=device)
             n_batches += 1
         random.setstate(py_rng)
@@ -820,7 +858,7 @@ def main():
     # train-tracking/. diag/ and probe/ keys keep their existing prefix. metrics.jsonl stays
     # unprefixed. Note: on this FINO lineage the JEPA loss is carried by the "jepa" key
     # (main's "ibot"); both are listed so the routing matches main regardless of lineage.
-    _MAIN_KEYS = {"dino", "ibot", "jepa", "kde", "fino", "total", "grad_norm", "lr",
+    _MAIN_KEYS = {"dino", "ibot", "jepa", "kde", "fino", "sdhl", "total", "grad_norm", "lr",
                   "val_dino", "val_ibot", "val_jepa", "val_kde", "val_total"}
 
     def _panel(k):
@@ -839,6 +877,8 @@ def main():
             student_backbone.train()
             student_dino_head.train()
             student_predictor.train()
+            if sdhl_head is not None:
+                sdhl_head.train()
             completed_step = step + 1
             should_log = completed_step == 1 or completed_step % train_cfg["log_every"] == 0
             should_diag = diag_every > 0 and should_log and completed_step % diag_every == 0
@@ -887,12 +927,17 @@ def main():
                              batch["meta_disc"].to(device, non_blocking=True),
                              {f: batch["mc_" + f].to(device, non_blocking=True) for f, _ in fino_cont}) if fino_cfg else None)
                     cond = batch["meta_disc"][:, cond_col].repeat(train_cfg["global_views"]).to(device, non_blocking=True) if jepa_cond else None
-                    dino_loss_value, jepa_loss, kde, meta_loss, diag = compute_losses(
+                    dino_loss_value, jepa_loss, kde, meta_loss, diag, sdhl_loss = compute_losses(
                         gf, lf, batch_size, masks, mask_idx, mask_w, teacher_temp, kde_scale,
                         ckpt=activation_checkpointing, meta=meta, cond=cond,
                         log_diag=should_diag,
                     )
+                    # SDHL adds a weighted auxiliary deep-supervision term. sdhl_head is None => term omitted
+                    # entirely (byte-identical baseline). Kept out of the pcgrad component list (that surgery is
+                    # over dino/jepa/kde/meta only); when pcgrad is on, SDHL grads are accumulated separately below.
                     total_loss = dino_loss_value + jepa_loss + kde + meta_loss
+                    if sdhl_head is not None:
+                        total_loss = total_loss + sdhl_loss_weight * sdhl_loss
                 opt.zero_grad(set_to_none=True)
                 pcgrad_diag = None
                 if pcgrad_enabled:
@@ -908,13 +953,19 @@ def main():
                         main_loss_idx=pcgrad_main_loss_idx, conflict_threshold=pcgrad_conflict_threshold,
                         mode=pcgrad_mode, ramp_weight=pcgrad_w,
                     )
+                    # SDHL is an auxiliary term outside the pcgrad component set; accumulate its grads on top of
+                    # the deconflicted grads pcgrad wrote into p.grad (and set the SDHL head grads, which pcgrad
+                    # never touches). No-op when SDHL is off.
+                    if sdhl_head is not None:
+                        (sdhl_loss_weight * sdhl_loss).backward()
                 else:
                     total_loss.backward()
                 if examples_seen / max_train_samples < freeze_backbone_frac:  # Phase 1: backbone frozen (patch_embed + heads + metadata still train)
                     for n, p in student_backbone.named_parameters():
                         if not n.startswith("patch_embed"): p.grad = None
                 grad_norm = nn.utils.clip_grad_norm_(
-                    [*student_backbone.parameters(), *student_dino_head.parameters(), *student_predictor.parameters()],
+                    [*student_backbone.parameters(), *student_dino_head.parameters(), *student_predictor.parameters(),
+                     *(sdhl_head.parameters() if sdhl_head is not None else [])],
                     dino_cfg["clip_grad"],
                 )
                 opt.step()
@@ -938,6 +989,8 @@ def main():
                     "fino": float(meta_loss.detach()),  # ovfx_fino_log
                     "total": float(total_loss.detach()),
                 }
+                if sdhl_head is not None:
+                    reduced["sdhl"] = float(sdhl_loss.detach())  # ovfx_sdhl_log
                 if pcgrad_diag is not None:
                     reduced.update({k: float(v) for k, v in pcgrad_diag.items()})  # ovfx_pcgrad_log
                 unique_counts = flush_unique_counts()
