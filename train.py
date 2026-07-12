@@ -214,11 +214,13 @@ def update_ema(student_module, teacher_module, momentum):
         bt.copy_(bs)
 
 
-def fair_supcon(z, y, temp):
+def fair_supcon(z, y, temp, w=None):
     # Fairness (cross-demographic) supervised contrastive loss. z: (N, D) L2-normalized CLS features; y: (N,) demographic
     # labels. Positives for anchor i are DIFFERENT-demographic tiles (y_j != y_i); the SupCon objective pulls them
     # together against all other tiles, so minimizing it destroys demographic cluster structure (the sensitive attribute
     # becomes non-separable in the representation). Anchors with no cross-demographic partner contribute nothing.
+    # w (optional): per-class weight vector; when given, each valid anchor's contribution is scaled by w[y_i] so
+    # minority-demographic anchors dominate the reduction (weighted mean). w=None reduces to the plain mean below.
     n = z.shape[0]
     if n < 2:
         return z.new_zeros(())
@@ -233,7 +235,10 @@ def fair_supcon(z, y, temp):
     if not bool(valid.any()):
         return z.new_zeros(())
     per_anchor = -(logprob.masked_fill(~pos, 0.0)).sum(1) / pos_count.clamp(min=1)
-    return per_anchor[valid].mean()
+    if w is None:
+        return per_anchor[valid].mean()
+    wa = w[y][valid]  # inverse-frequency weight of each valid anchor's own class
+    return (per_anchor[valid] * wa).sum() / wa.sum().clamp(min=1e-12)
 
 
 def pcgrad_project(g_main, g_dem, params):
@@ -281,6 +286,11 @@ def main():
     # SupCon term added to meta_loss. Unused by fino/dann/pcgrad.
     contrastive_temp = float(fino_cfg.get("contrastive_temp", 0.2)) if fino_cfg else 0.2
     contrastive_weight = float(fino_cfg.get("contrastive_weight", 0.1)) if fino_cfg else 0.1
+    # Inverse-frequency demographic reweighting (ablation axis; default "none" == current behavior, byte-identical).
+    # "inverse_freq" upweights minority demographic classes in the discrete-factor loss (see race_weights below).
+    race_weight_mode = (fino_cfg.get("race_weight", "none") if fino_cfg else "none")
+    if race_weight_mode not in ("none", "inverse_freq"):
+        raise ValueError(f"fino.race_weight must be 'none' or 'inverse_freq', got {race_weight_mode!r}")
     # FINO two-phase: freeze the backbone (except patch_embed) for the first this-fraction of the run so the DINO/JEPA
     # heads + metadata prototypes/predictors converge against a fixed target before they steer the encoder. 0 = off.
     freeze_backbone_frac = float(dino_cfg.get("freeze_backbone_fraction", 0.0))
@@ -322,6 +332,26 @@ def main():
         param_groups.append({"params": [p for m in predictors.values() for p in m.parameters()], "lr_mult": 1.0, "wd_mult": 1.0, "last_layer": False})
     if adversaries:
         param_groups.append({"params": [p for m in adversaries.values() for p in m.parameters()], "lr_mult": 1.0, "wd_mult": 1.0, "last_layer": False})
+    # Per-discrete-factor inverse-frequency class weights (built only when fino.race_weight == "inverse_freq"; else {}).
+    # SOURCE: fino_meta["discrete"][f] is the per-barcode {barcode: class_idx} map the labels are drawn from; we tally
+    # patient-level class counts from it (no data pass needed, deterministic). NORMALIZATION: w_c = (P / sum_inv) * (1/n_c)
+    # for classes with count n_c > 0 (P = #present classes), 0 for absent classes, so the mean weight over present
+    # classes is exactly 1.0 (keeps the demographic-loss magnitude comparable to the unweighted default). Consumed as
+    # the weight= arg of the demographic cross_entropy (dann/fino/pcgrad) and as per-anchor weights for contrastive.
+    race_weights = {}
+    if fino_cfg and race_weight_mode == "inverse_freq":
+        for f, _ in fino_disc:
+            ncls = int(fino_meta["n"][f])
+            counts = torch.zeros(ncls, dtype=torch.double)
+            for c in fino_meta.get("discrete", {}).get(f, {}).values():
+                if isinstance(c, int) and 0 <= c < ncls:
+                    counts[c] += 1.0
+            inv = torch.where(counts > 0, 1.0 / counts.clamp(min=1.0), torch.zeros_like(counts))
+            present = (counts > 0).sum().clamp(min=1).double()
+            w = inv * (present / inv.sum().clamp(min=1e-12))  # mean over present classes == 1.0
+            race_weights[f] = w.float().to(device)
+            print(f"{console_prefix()} [race_weight] factor={f} counts={counts.long().tolist()} "
+                  f"weights={[round(x, 4) for x in w.tolist()]}", flush=True)
     opt = torch.optim.AdamW(param_groups, lr=1.0, betas=(0.9, dino_cfg["adam_beta2"]))
     # FINO prototype banks: one unit vector per discrete-factor value, EMA-updated from teacher CLS in compute_losses.
     # Not built for method=dann (that path uses the learned adversary heads above instead).
@@ -561,20 +591,20 @@ def main():
                             # head is trained to classify the attribute while the encoder is pushed to unlearn it. Same
                             # sigmoid gamma ramp and missing-label mask (ok) as FINO; no prototype bank / no EMA update.
                             logits = adversaries[f](GradScale.apply(sg["x_norm_clstoken"].float()[ok], sign * gamma))
-                            terms.append((f, 0.03 * F.cross_entropy(logits, lab[ok])))
+                            terms.append((f, 0.03 * F.cross_entropy(logits, lab[ok], weight=race_weights.get(f))))
                         elif fairness_method == "pcgrad":
                             # PCGrad: plain demographic CE from a learned classifier on the RAW student CLS, NO gradient
                             # reversal. This term is returned as meta_loss but the pcgrad step site does NOT add it to
                             # total_loss; it uses this gradient to project the SSL gradient (see pcgrad_apply).
                             logits = adversaries[f](sg["x_norm_clstoken"].float()[ok])
-                            terms.append((f, F.cross_entropy(logits, lab[ok])))
+                            terms.append((f, F.cross_entropy(logits, lab[ok], weight=race_weights.get(f))))
                         elif fairness_method == "contrastive":
                             # Cross-demographic supervised contrastive: DIFFERENT-demographic tiles are positives pulled
                             # together, removing demographic separability from the CLS features (see fair_supcon).
-                            terms.append((f, contrastive_weight * fair_supcon(phi_s[ok], lab[ok], contrastive_temp)))
+                            terms.append((f, contrastive_weight * fair_supcon(phi_s[ok], lab[ok], contrastive_temp, w=race_weights.get(f))))
                         else:
                             logits = (GradScale.apply(phi_s[ok], sign * gamma) @ protos[f].t()) / 0.023
-                            terms.append((f, 0.03 * F.cross_entropy(logits, lab[ok])))
+                            terms.append((f, 0.03 * F.cross_entropy(logits, lab[ok], weight=race_weights.get(f))))
                             with torch.no_grad():
                                 pt, lt = phi_t[ok], lab[ok]
                                 upd = torch.zeros_like(protos[f]).index_add_(0, lt, pt)
