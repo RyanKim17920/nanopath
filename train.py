@@ -898,15 +898,20 @@ def main():
                 lr = dino_cfg["lr"] * warmup
             else:
                 lr = cosine_schedule(dino_cfg["lr"], dino_cfg["lr_min"], (lr_frac - dino_cfg["warmup_fraction"]) / max(1e-9, 1 - dino_cfg["warmup_fraction"]))
-            wd = cosine_schedule(0.04, 0.2, reg_frac)
-            teacher_temp = 0.04 + min(1.0, reg_frac / 0.2727) * (0.07 - 0.04)
+            wd = cosine_schedule(dino_cfg.get("wd_start", 0.04), dino_cfg.get("wd_end", 0.2), reg_frac)
+            _tt_s = dino_cfg.get("teacher_temp_start", 0.04)
+            _tt_e = dino_cfg.get("teacher_temp_end", 0.07)
+            _tt_w = dino_cfg.get("teacher_temp_warmup_frac", 0.2727)
+            teacher_temp = _tt_s + min(1.0, reg_frac / max(1e-9, _tt_w)) * (_tt_e - _tt_s)
             last_layer_lr = 0.0 if frac < dino_cfg["freeze_last_layer_fraction"] else lr
             for group in opt.param_groups:
                 base_lr = last_layer_lr if group["last_layer"] else lr
                 group["lr"] = base_lr * group["lr_mult"]
                 group["weight_decay"] = wd * group["wd_mult"]
             masks, mask_idx, mask_w = make_block_mask(batch_size * train_cfg["global_views"], global_grid, device, n_blocks=int(dino_cfg["jepa_blocks"]), block_scale=float(dino_cfg["jepa_block_scale"]))
-            kde_scale = min(1.0, max(0.0, (reg_frac - 0.1) / 0.4))
+            _kde_s = dino_cfg.get("kde_warmup_start_frac", 0.1)
+            _kde_l = dino_cfg.get("kde_warmup_len_frac", 0.4)
+            kde_scale = 1.0 if _kde_l <= 0 else min(1.0, max(0.0, (reg_frac - _kde_s) / _kde_l))
             # Wrap forward + backward + opt.step in FlopCounterMode on the first step only;
             # subsequent steps reuse measured_flops_per_step (fixed shapes => fixed cost).
             flop_ctx = FlopCounterMode(display=False) if measured_flops_per_step is None else contextlib.nullcontext()
@@ -971,7 +976,8 @@ def main():
                 print(f"{console_prefix()} measured_flops_per_step: {measured_flops_per_step:,}", flush=True)
             step_train_flops = measured_flops_per_step
             with torch.no_grad():
-                m = cosine_schedule(0.994, 1.0, reg_frac)
+                m = cosine_schedule(dino_cfg.get("momentum_teacher_start", 0.994),
+                                    dino_cfg.get("momentum_teacher_end", 1.0), reg_frac)
                 update_ema(student_backbone, teacher_backbone, m)
                 update_ema(student_dino_head, teacher_dino_head, m)
             step_seconds = time.monotonic() - batch_started_at
