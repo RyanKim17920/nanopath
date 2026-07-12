@@ -113,15 +113,32 @@ class TCGATileDataset(Dataset):
         in_split_shard = []
         in_split_row = []
         shard_sizes = []
+        # Optional pretraining holdout: barcodes listed here (one TCGA-XX-XXXX per line) are
+        # skipped entirely so the SSL encoder never sees downstream eval-task patients.
+        exclude_file = data.get("exclude_barcodes_file")
+        exclude_barcodes = (
+            {ln.strip() for ln in Path(exclude_file).read_text().splitlines() if ln.strip()}
+            if exclude_file else set()
+        )
+        n_excluded_tiles = 0
+        excluded_patients = set()
         for shard_idx, shard_path in enumerate(self.shards):
             paths = pq.read_table(str(shard_path), columns=["path"], memory_map=True)["path"].to_pylist()
             shard_sizes.append(len(paths))
             for row_idx, p in enumerate(paths):
+                barcode = patient_id_from_relpath(p)
+                # Drop held-out eval-task patients before the train/val split so they leak into neither.
+                if barcode in exclude_barcodes:
+                    n_excluded_tiles += 1
+                    excluded_patients.add(barcode)
+                    continue
                 # XOR with is_train: training keeps tiles where patient_in_val is False,
                 # validation keeps the complement.
-                if patient_in_val(patient_id_from_relpath(p), data["split_seed"], data["val_fraction"]) != is_train:
+                if patient_in_val(barcode, data["split_seed"], data["val_fraction"]) != is_train:
                     in_split_shard.append(shard_idx)
                     in_split_row.append(row_idx)
+        if exclude_barcodes:
+            print(f"excluded {n_excluded_tiles} tiles from {len(excluded_patients)} held-out patients")
         if not in_split_shard:
             raise ValueError(f"no {'train' if is_train else 'val'} tiles found in {dataset_dir}; check val_fraction={data['val_fraction']}")
         # Two parallel int32 arrays (~32 MB total for 4M tiles) shared COW across DataLoader fork-workers.
