@@ -26,7 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import wandb
 import yaml
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch.utils.flop_counter import FlopCounterMode
 
 from dataloader import TCGATileDataset, TILE_SIZE
@@ -291,6 +291,13 @@ def main():
     race_weight_mode = (fino_cfg.get("race_weight", "none") if fino_cfg else "none")
     if race_weight_mode not in ("none", "inverse_freq"):
         raise ValueError(f"fino.race_weight must be 'none' or 'inverse_freq', got {race_weight_mode!r}")
+    # Race-balanced RESAMPLING (3rd race-handling mode, orthogonal to race_weight's loss reweighting).
+    # When True the training DataLoader draws tiles via a WeightedRandomSampler with per-tile weight =
+    # inverse race-class frequency (dataset.race_sample_weights), so minority races are oversampled to
+    # parity in expectation. Default False -> sampler=None, shuffle=True (byte-identical to prior behavior).
+    # Single-GPU assumption: these fairness runs are single-process (no DDP/DistributedSampler in this
+    # train.py), so the weighted sampler simply replaces shuffle without needing a distributed-aware wrapper.
+    race_resample = bool(fino_cfg.get("race_resample", False)) if fino_cfg else False
     # FINO two-phase: freeze the backbone (except patch_embed) for the first this-fraction of the run so the DINO/JEPA
     # heads + metadata prototypes/predictors converge against a fixed target before they steer the encoder. 0 = off.
     freeze_backbone_frac = float(dino_cfg.get("freeze_backbone_fraction", 0.0))
@@ -499,7 +506,16 @@ def main():
     loader_kwargs = dict(batch_size=batch_size, drop_last=True, num_workers=train_cfg["num_workers"], pin_memory=True,
                          prefetch_factor=train_cfg["prefetch_factor"] if train_cfg["num_workers"] > 0 else None,
                          persistent_workers=train_cfg["persistent_workers"] and train_cfg["num_workers"] > 0)
-    train_loader = DataLoader(train_ds, shuffle=True, **loader_kwargs)
+    # Race-balanced resampling: build a WeightedRandomSampler over the train split (replacement=True,
+    # one epoch's worth of draws) that oversamples minority races to parity. Only when fino.race_resample;
+    # otherwise train_sampler stays None and the loader keeps shuffle=True (byte-identical default path).
+    train_sampler = None
+    if race_resample:
+        race_w = train_ds.race_sample_weights("race")
+        train_sampler = WeightedRandomSampler(race_w, num_samples=len(train_ds), replacement=True)
+        print(f"{console_prefix()} [race_resample] weighted sampler over {len(train_ds)} tiles "
+              f"(w min/mean/max={race_w.min():.4f}/{race_w.mean():.4f}/{race_w.max():.4f})", flush=True)
+    train_loader = DataLoader(train_ds, shuffle=(train_sampler is None), sampler=train_sampler, **loader_kwargs)
     val_loader = DataLoader(val_ds, shuffle=False, **loader_kwargs)
 
     activation_checkpointing = bool(train_cfg["activation_checkpointing"])

@@ -113,6 +113,13 @@ class TCGATileDataset(Dataset):
         in_split_shard = []
         in_split_row = []
         shard_sizes = []
+        # Race-balanced resampling (fino.race_resample): retain the per-tile patient barcode so a
+        # WeightedRandomSampler can be built later (see race_sample_weights). Only populated in this
+        # mode; references are deduped via _bc_cache so ~4M tiles cost ~one pointer each (a few
+        # thousand unique barcode strings). Default (False) leaves the index build byte-identical.
+        want_race_resample = bool((cfg.get("fino") or {}).get("race_resample", False))
+        in_split_barcode = []
+        _bc_cache = {}
         # Optional pretraining holdout: barcodes listed here (one TCGA-XX-XXXX per line) are
         # skipped entirely so the SSL encoder never sees downstream eval-task patients.
         exclude_file = data.get("exclude_barcodes_file")
@@ -137,6 +144,8 @@ class TCGATileDataset(Dataset):
                 if patient_in_val(barcode, data["split_seed"], data["val_fraction"]) != is_train:
                     in_split_shard.append(shard_idx)
                     in_split_row.append(row_idx)
+                    if want_race_resample:
+                        in_split_barcode.append(_bc_cache.setdefault(barcode, barcode))
         if exclude_barcodes:
             print(f"excluded {n_excluded_tiles} tiles from {len(excluded_patients)} held-out patients")
         if not in_split_shard:
@@ -144,6 +153,9 @@ class TCGATileDataset(Dataset):
         # Two parallel int32 arrays (~32 MB total for 4M tiles) shared COW across DataLoader fork-workers.
         self.shard_of = np.asarray(in_split_shard, dtype=np.int32)
         self.row_of = np.asarray(in_split_row, dtype=np.int32)
+        # Per-tile barcodes kept only for fino.race_resample; None otherwise (default path untouched).
+        self.race_resample = want_race_resample
+        self._tile_barcodes = in_split_barcode if want_race_resample else None
         # FINO metadata, built/copied once by prepare.py: per-factor barcode->id (discrete) / barcode->value
         # (continuous, z-scored) maps. cfg.fino.discrete/continuous select factors and their sign (+ encourage /
         # - suppress). Loaded once so DataLoader fork-workers share it copy-on-write; train.py masks absent ones.
@@ -194,6 +206,42 @@ class TCGATileDataset(Dataset):
     # Dataset length is the number of tiles in this train/val split.
     def __len__(self):
         return int(self.shard_of.shape[0])
+
+    # Per-tile sampling weights for a race-balanced torch WeightedRandomSampler (fino.race_resample).
+    # WEIGHT RULE: weight_i = 1 / n_tiles(race class of tile i) for tiles with a KNOWN race class, so
+    # every race class receives equal total sampling mass -> in expectation the sampler draws race
+    # classes uniformly (minority races White~82%/Black~10%/Asian~7% oversampled toward parity).
+    # MISSING RACE (id < 0, incl. barcodes absent from the map): assigned the MEAN present-tile weight,
+    # i.e. sampled at the average per-tile rate -- neither promoted nor suppressed -- so unlabeled tiles
+    # keep participating without distorting the balance among labeled tiles. The vector is scaled to
+    # mean 1.0 (WeightedRandomSampler only uses weight ratios). Mirrors __getitem__'s label source:
+    # a per-tile tile_npy label if present, else the per-barcode meta_disc map. Returns a float64
+    # torch tensor of length len(self). Requires the dataset to have been built with race_resample=True.
+    def race_sample_weights(self, factor="race"):
+        n = len(self)
+        if not getattr(self, "fino", False):
+            raise ValueError("race_sample_weights requires fino.enabled=True")
+        if factor in getattr(self, "tile_label", {}):
+            race_ids = np.asarray(self.tile_label[factor], dtype=np.int64)
+        else:
+            if self._tile_barcodes is None:
+                raise ValueError("race_sample_weights requires fino.race_resample=True (per-tile barcodes not retained)")
+            m = self.meta_disc[factor]
+            race_ids = np.fromiter((int(m.get(bc, -1)) for bc in self._tile_barcodes), dtype=np.int64, count=n)
+        present = race_ids >= 0
+        weights = np.zeros(n, dtype=np.float64)
+        if present.any():
+            classes, counts = np.unique(race_ids[present], return_counts=True)
+            cls_w = {int(c): 1.0 / int(cnt) for c, cnt in zip(classes.tolist(), counts.tolist())}
+            weights[present] = np.array([cls_w[int(c)] for c in race_ids[present]], dtype=np.float64)
+            mean_present = float(weights[present].mean())
+        else:
+            mean_present = 1.0
+        weights[~present] = mean_present  # missing race -> average per-tile sampling rate
+        total = weights.sum()
+        if total > 0:
+            weights *= n / total  # scale to mean 1.0 (ratios, hence the sampler, unchanged)
+        return torch.from_numpy(weights)
 
     # Read one JPEG row, decode, apply augmentations, and return train.py fields.
     def __getitem__(self, idx):
