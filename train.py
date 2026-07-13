@@ -768,7 +768,19 @@ def main():
             kde_scale = min(1.0, max(0.0, (reg_frac - 0.1) / 0.4))
             # Wrap forward + backward + opt.step in FlopCounterMode on the first step only;
             # subsequent steps reuse measured_flops_per_step (fixed shapes => fixed cost).
-            flop_ctx = FlopCounterMode(display=False) if measured_flops_per_step is None else contextlib.nullcontext()
+            # FlopCounterMode installs _will_engine_execute_node autograd hooks that are incompatible
+            # with torch.autograd.grad() (the method=pcgrad path -> pcgrad_apply): wrapping the backward
+            # raises "A leaf node was passed to _will_engine_execute_node but we are currently running
+            # autograd.grad()". So for pcgrad we meter the FORWARD only (a nested counter entered here and
+            # exited before pcgrad_apply) and scale by 3 (fwd + 2*bwd, the standard single-step estimate)
+            # so measured_flops_per_step stays a sane positive value; every other method wraps the whole
+            # step exactly as before. (meta is not None iff fino_cfg is set -- see the pcgrad branch below.)
+            measuring = measured_flops_per_step is None
+            forward_only = measuring and fairness_method == "pcgrad" and bool(fino_cfg)
+            flop_ctx = FlopCounterMode(display=False) if (measuring and not forward_only) else contextlib.nullcontext()
+            fwd_ctx = FlopCounterMode(display=False) if forward_only else None
+            if fwd_ctx is not None:
+                fwd_ctx.__enter__()
             with flop_ctx:
                 with autocast:
                     # Crop-major flatten: collate shape is (B, V, 3, H, W) but DINO wants per-crop chunks
@@ -788,6 +800,9 @@ def main():
                         ckpt=activation_checkpointing, meta=meta, cond=cond,
                     )
                     total_loss = dino_loss_value + jepa_loss + kde + meta_loss
+                if fwd_ctx is not None:
+                    # Close the forward-only counter before autograd.grad() runs (pcgrad path).
+                    fwd_ctx.__exit__(None, None, None)
                 if fairness_method == "pcgrad" and meta is not None:
                     # PCGrad fairness: no single total_loss.backward(). Get the main SSL gradient and the demographic
                     # gradient separately, project the former onto the orthogonal complement of the latter, then apply.
@@ -805,7 +820,7 @@ def main():
                 )
                 opt.step()
             if measured_flops_per_step is None:
-                measured_flops_per_step = int(flop_ctx.get_total_flops())
+                measured_flops_per_step = (3 * int(fwd_ctx.get_total_flops())) if forward_only else int(flop_ctx.get_total_flops())
                 print(f"{console_prefix()} measured_flops_per_step: {measured_flops_per_step:,}", flush=True)
             step_train_flops = measured_flops_per_step
             with torch.no_grad():
