@@ -464,6 +464,28 @@ class DinoV2ViT(nn.Module):
                     sinkhorn_out = torch.stack(d_cls, dim=1).mean(dim=1)
             feats = feats + [F.normalize(sinkhorn_out, dim=-1, p=2)]
             return torch.cat(feats, dim=-1)  # [B, 5 * embed_dim]
+        if mode == "cls_normw_depth":
+            # Adaptive block selection by RAW (pre-self.norm) L2-norm magnitude of each depth's
+            # CLS token (high-norm depth = more informative; the same "high-norm = informative"
+            # prior as the patch-level normweight mode, lifted to the DEPTH axis). Softmax over the
+            # 4 depths gives per-image adaptive weights; the norm-weighted depth SUMMARY is appended
+            # as a 5th block ON TOP of the full concat_fino base (additive -> cannot dilute the
+            # validated 4*D classification stack). Fixed feed-forward on frozen features, no per-image
+            # optimization, no eval-set statistics -> legal under the eval-fairness rule.
+            # Tunables (env): OVFX_NORMW_TEMP softmax temperature (default 1.0),
+            #                 OVFX_NORMW_ALPHA scale on the appended block (default 1.0).
+            temp  = float(os.environ.get("OVFX_NORMW_TEMP", "1.0"))
+            alpha = float(os.environ.get("OVFX_NORMW_ALPHA", "1.0"))
+            caps = self._forward_intermediates(x, self.CLS_DEPTHS)
+            raw_cls = [caps[d][:, 0] for d in self.CLS_DEPTHS]              # pre-norm CLS, each [B, D]
+            d_cls   = [self.norm(caps[d])[:, 0] for d in self.CLS_DEPTHS]   # concat_fino convention
+            feats   = [F.normalize(c, dim=-1, p=2) for c in d_cls]          # concat_fino base: 4 x [B, D]
+            norms   = torch.stack([c.norm(dim=-1) for c in raw_cls], dim=-1)  # [B, K] raw magnitudes
+            w       = F.softmax(norms / temp, dim=-1)                       # [B, K] adaptive weights
+            d_stack = torch.stack(d_cls, dim=1)                             # [B, K, D]
+            summary = (d_stack * w.unsqueeze(-1)).sum(dim=1)               # [B, D] norm-weighted depth sum
+            feats   = feats + [alpha * F.normalize(summary, dim=-1, p=2)]   # appended 5th block
+            return torch.cat(feats, dim=-1)                                 # [B, 5 * D]
         caps = self._forward_intermediates(x, self.CLS_DEPTHS)
         feats = [F.normalize(self.norm(caps[d])[:, 0], dim=-1, p=2) for d in self.CLS_DEPTHS]
         if mode == "concat_meanpatch":

@@ -1,8 +1,8 @@
 project:
-  name: ovfx_c3_base207925
+  name: smoke_pp_cls_normw_depth_jbu_last4
   family: nanopath
   recipe_id: dinov2-vits14-reg-jepa-mask10
-  output_dir: /data/ryan.kim/nanopath/overfitX-batch03/smoke_deploy_seed207925
+  output_dir: /data/ryan.kim/nanopath/overfitX-batch05/smoke_pp_cls_normw_depth_jbu_last4
   wandb_dir: /data/$USER/nanopath/wandb
 data:
   dataset_dir: /data/nanopath_parquet

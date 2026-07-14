@@ -1,8 +1,8 @@
 project:
-  name: overfitx-batch5-preprobe-patch_softmax
+  name: pp_cls_normw_depth_jbu_last4
   family: nanopath
   recipe_id: dinov2-vits14-reg-kde
-  output_dir: /data/$USER/nanopath/main/default
+  output_dir: /data/ryan.kim/nanopath/overfitX-batch05/pp_cls_normw_depth_jbu_last4
   wandb_dir: /data/$USER/nanopath/wandb
 data:
   dataset_dir: /data/nanopath_parquet
@@ -46,9 +46,10 @@ train:
   local_views: 8
   global_size: 224
   local_size: 98
-  resume: null
+  resume: /data/ryan.kim/nanopath/overfitX-batch05/c5-base-748839/latest.pt
 dino:
   lr: 0.0001
+  cls_normw_depth: true
   lr_min: 1.0e-06
   adam_beta2: 0.99
   warmup_fraction: 0.03
