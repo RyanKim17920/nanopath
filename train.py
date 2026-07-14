@@ -336,18 +336,32 @@ def main():
     # auxiliary deep-supervision term = mean-over-depths (concat-merged) smooth_l1 reusing JEPA's mask weighting.
     # Disabled unless a top-level `sdhl:` block sets enabled: true, so the baseline path is byte-identical (no
     # return_blocks capture, no extra loss term). Knobs (canonical dotted paths): sdhl.enabled, sdhl.target_blocks
-    # (default [8,9,10,11]), sdhl.merge ("concat"), sdhl.loss_weight (0.2), sdhl.per_depth_layernorm.
+    # (default [8,9,10,11]), sdhl.merge ("concat"), sdhl.loss_weight (0.2), sdhl.per_depth_layernorm, sdhl.mode.
     sdhl_cfg = cfg.get("sdhl") or {}
     sdhl_enabled = bool(sdhl_cfg.get("enabled", False))
     sdhl_target_blocks = [int(b) for b in sdhl_cfg.get("target_blocks", [8, 9, 10, 11])]
     sdhl_per_depth_ln = bool(sdhl_cfg.get("per_depth_layernorm", True))
     sdhl_merge = str(sdhl_cfg.get("merge", "concat"))
     sdhl_loss_weight = float(sdhl_cfg.get("loss_weight", 0.2))
+    # sdhl.mode selects how SDHL relates to the graduated final-layer JEPA term (jepa_loss):
+    #   "add" (DEFAULT, baseline-preserving): SDHL is an auxiliary term ADDED on top of jepa_loss. With the
+    #         default target_blocks=[8,9,10,11], block 11 is the FINAL transformer block (vits14 depth=12,
+    #         indices 0-11), so SDHL's block-11 linear head re-predicts the SAME EMA-teacher final-block
+    #         latent that jepa_loss already predicts via its depth-4 transformer predictor -> that target is
+    #         DOUBLE-COUNTED (once by the strong transformer head at weight 1.0, again by a weak linear head).
+    #   "unified"/"replace_jepa": the final block is OWNED SOLELY by the JEPA transformer predictor and DROPPED
+    #         from SDHL's target set (stripped below, once the backbone depth is known), so SDHL contributes
+    #         ONLY genuine intermediate deep supervision. jepa_loss (final depth, strong transformer head,
+    #         weight 1.0) + SDHL (intermediate depths, linear heads) then form ONE coherent multi-depth
+    #         self-prediction objective in which every teacher latent is regressed EXACTLY ONCE (no double-count).
+    sdhl_mode = str(sdhl_cfg.get("mode", "add")).lower()
+    if sdhl_enabled and sdhl_mode not in ("add", "unified", "replace_jepa"):
+        raise ValueError(f"sdhl.mode must be one of add|unified|replace_jepa, got {sdhl_mode!r}")
     if sdhl_enabled and (sdhl_loss_weight <= 0 or len(sdhl_target_blocks) == 0):
         raise ValueError(f"sdhl.enabled=true requires loss_weight>0 and non-empty target_blocks; got "
                          f"loss_weight={sdhl_loss_weight}, target_blocks={sdhl_target_blocks}")
     if sdhl_enabled:
-        print(f"{console_prefix()} SDHL ENABLED target_blocks={sdhl_target_blocks} merge={sdhl_merge} "
+        print(f"{console_prefix()} SDHL ENABLED mode={sdhl_mode} target_blocks={sdhl_target_blocks} merge={sdhl_merge} "
               f"per_depth_layernorm={sdhl_per_depth_ln} loss_weight={sdhl_loss_weight}", flush=True)
     # Multi-scale local crops: `train.local_size_mix` is an optional list of [size, count]
     # pairs (e.g. [[112, 4], [128, 4]]) that REPLACES the single-scalar train.local_size /
@@ -398,6 +412,21 @@ def main():
     student_dino_head = DINOHead(student_backbone.embed_dim, 131072, dino_cfg["head_hidden_dim"], dino_cfg["head_bottleneck_dim"], 3).to(device)
     teacher_dino_head = deepcopy(student_dino_head)
     student_predictor = JEPAPredictor(student_backbone.embed_dim, depth=int(dino_cfg["jepa_pred_depth"]), width=int(dino_cfg["jepa_pred_width"]), n_cond=(fino_meta["n"][jepa_cond] if jepa_cond else 0)).to(device)
+    # sdhl.mode="unified"/"replace_jepa": strip the FINAL block from SDHL's target set so the final-layer teacher
+    # latent is regressed ONLY by the JEPA transformer predictor (jepa_loss), never re-predicted by an SDHL linear
+    # head. This eliminates the block-<final> double-count and leaves SDHL as pure intermediate deep supervision.
+    # Runs before sdhl_head/return_blocks/optimizer/checkpoint all key off sdhl_target_blocks, so the drop is
+    # consistent everywhere. "add" mode (default) leaves target_blocks untouched (baseline behaviour preserved).
+    if sdhl_enabled and sdhl_mode in ("unified", "replace_jepa"):
+        _final_blk = len(student_backbone.blocks) - 1
+        _kept = [b for b in sdhl_target_blocks if b != _final_blk]
+        if len(_kept) != len(sdhl_target_blocks):
+            print(f"{console_prefix()} SDHL mode={sdhl_mode}: dropped final block {_final_blk} from target_blocks "
+                  f"(owned solely by JEPA transformer predictor); SDHL targets -> {_kept}", flush=True)
+        sdhl_target_blocks = _kept
+        if not sdhl_target_blocks:
+            raise ValueError(f"sdhl.mode={sdhl_mode} left no intermediate target_blocks after dropping the final "
+                             f"block {_final_blk}; provide at least one non-final block in sdhl.target_blocks")
     # SDHL multi-depth head: per-target-block student->prediction linears (trainable) + non-affine target norms.
     # None when disabled => no params, no optimizer group, no loss term (baseline byte-identical).
     sdhl_head = SDHLHead(student_backbone.embed_dim, sdhl_target_blocks, per_depth_layernorm=sdhl_per_depth_ln, merge=sdhl_merge).to(device) if sdhl_enabled else None

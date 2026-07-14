@@ -64,6 +64,12 @@ sdhl:
   merge: concat
   loss_weight: 0.2
   per_depth_layernorm: true
+  # mode: how SDHL relates to the graduated final-layer JEPA term.
+  #   add     (default): SDHL added on top of jepa_loss. With target_blocks including block 11 (the FINAL
+  #           block) the final-block teacher latent is DOUBLE-COUNTED (jepa transformer head + SDHL linear head).
+  #   unified (a.k.a. replace_jepa): the final block is dropped from SDHL and owned solely by the JEPA transformer
+  #           predictor, so jepa + SDHL form ONE multi-depth objective with each depth regressed exactly once.
+  mode: add
 
 dino:
   lr: 1.0e-4
