@@ -54,3 +54,7 @@ core.*
 # prepare.py download=True rewrites absent /data + /block roots to nanopath/data/.
 data/
 preserved_run_logs/
+
+# Training run output dirs — keep out of labless_source snapshot (prevents recursive copy) + git
+20260[0-9][0-9]-*/
+runs/
